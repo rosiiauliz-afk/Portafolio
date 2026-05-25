@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v7.1 - manual-only sync - prioridad TI badge - 2026-05-25 -->
+<!-- v7.2 - manual-only sync - no firebase auto-excel-reload - prioridad TI badge - 2026-05-25 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -32,36 +32,36 @@ window._fbRef = ref;
 window._fbSet = set;
 
 // ── Escuchar cambios en tiempo real desde Firebase ──────────────────────────
-// Cualquier cambio que haga OTRO usuario se refleja aquí automáticamente
+// Solo sincroniza DATA (proyectos, riesgos, snapshots) — NUNCA recarga el Excel
 const pmoRef = ref(db, 'pmo');
 onValue(pmoRef, (snapshot) => {
   const data = snapshot.val();
-  if (!data) return; // Base de datos vacía todavía
+  if (!data) return;
 
-  // Ignorar si los datos son iguales a los actuales (para no re-renderizar en balde)
+  // Ignorar si los datos son iguales a los actuales
   const incomingHash = JSON.stringify({ db: data.DB?.length, rdb: data.RDB?.length, ts: data.savedAt });
   if (window._lastFbHash === incomingHash) return;
   window._lastFbHash = incomingHash;
 
   // Aplicar datos remotos al estado local
-  // IMPORTANTE: Los SNAPS (histórico) NUNCA se sobreescriben si ya tenemos más localmente
-  window.DB       = data.DB       || [];
-  window.RDB      = data.RDB      || [];
-  // Preservar el histórico más completo: el local o el remoto, el que tenga más snapshots
+  window.DB    = data.DB  || [];
+  window.RDB   = data.RDB || [];
+
+  // Preservar el histórico más completo
   const remoteSNAPS = data.SNAPS || [];
   const localSNAPS  = window.SNAPS || [];
-  window.SNAPS    = remoteSNAPS.length >= localSNAPS.length ? remoteSNAPS : localSNAPS;
-  window.pptxFile = data.pptxFile || '';
-  window.xlsxFile = data.xlsxFile || '';
+  window.SNAPS = remoteSNAPS.length >= localSNAPS.length ? remoteSNAPS : localSNAPS;
+
+  // NO restaurar pptxFile ni xlsxFile — eso evita que Firebase
+  // dispare recargas automáticas del Excel al abrir la app
+  // window.pptxFile y window.xlsxFile se mantienen como están localmente
 
   window.DB.forEach(d => { d._estatus = window.normEstatus(d._estatus); });
   window.deduplicateRDB();
 
-  // Mostrar dashboard si hay datos
   if (window.DB.length || window.SNAPS.length) {
     window.restoreUIFromData();
     window.refreshAllViews();
-    // Solo mostrar toast si ya había datos antes (no en la carga inicial)
     if (window._fbInitialized) {
       window.toast('🔄 Datos sincronizados en tiempo real');
     }
