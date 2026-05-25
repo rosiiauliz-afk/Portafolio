@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v7.5 - firebase sync SNAPS+DB+RDB correctly - 2026-05-25 -->
+<!-- v7.6 - savedAt hash for real-time updates - SNAPS sync - 2026-05-25 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -37,8 +37,8 @@ onValue(pmoRef, (snapshot) => {
   const data = snapshot.val();
   if (!data) return;
 
-  // Ignorar si los datos son iguales
-  const incomingHash = JSON.stringify({ db: data.DB?.length, rdb: data.RDB?.length, snaps: data.SNAPS?.length, ts: data.savedAt });
+  // Detectar cambios usando savedAt — cualquier recarga del Excel genera nuevo timestamp
+  const incomingHash = data.savedAt || '';
   if (window._lastFbHash === incomingHash) return;
   window._lastFbHash = incomingHash;
 
@@ -51,9 +51,7 @@ onValue(pmoRef, (snapshot) => {
   const localSNAPS  = window.SNAPS || [];
   if (remoteSNAPS.length >= localSNAPS.length) {
     window.SNAPS = remoteSNAPS;
-  }
-  // Si el local tiene más, subir el local a Firebase para sincronizar
-  else if (localSNAPS.length > remoteSNAPS.length && typeof window.saveToFirebase === 'function') {
+  } else if (localSNAPS.length > remoteSNAPS.length && typeof window.saveToFirebase === 'function') {
     window.saveToFirebase();
   }
 
