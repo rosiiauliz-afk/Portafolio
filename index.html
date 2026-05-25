@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v7.6 - savedAt hash for real-time updates - SNAPS sync - 2026-05-25 -->
+<!-- v7.7 - unique savedAt hash, SNAPS sync, real-time for all users - 2026-05-25 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -31,14 +31,14 @@ window._fbDB  = db;
 window._fbRef = ref;
 window._fbSet = set;
 
-// ── Firebase: sincroniza datos entre todos los usuarios ──────────────────────
+// ── Firebase: sincroniza datos entre todos los usuarios en tiempo real ────────
 const pmoRef = ref(db, 'pmo');
 onValue(pmoRef, (snapshot) => {
   const data = snapshot.val();
   if (!data) return;
 
-  // Detectar cambios usando savedAt — cualquier recarga del Excel genera nuevo timestamp
-  const incomingHash = data.savedAt || '';
+  // Hash completo: timestamp + contenido — detecta CUALQUIER cambio
+  const incomingHash = data.savedAt + '|' + (data.DB?.length||0) + '|' + (data.SNAPS?.length||0);
   if (window._lastFbHash === incomingHash) return;
   window._lastFbHash = incomingHash;
 
@@ -51,8 +51,11 @@ onValue(pmoRef, (snapshot) => {
   const localSNAPS  = window.SNAPS || [];
   if (remoteSNAPS.length >= localSNAPS.length) {
     window.SNAPS = remoteSNAPS;
-  } else if (localSNAPS.length > remoteSNAPS.length && typeof window.saveToFirebase === 'function') {
-    window.saveToFirebase();
+  } else {
+    // Local tiene más snapshots — subir a Firebase para que todos los vean
+    setTimeout(() => {
+      if (typeof window.saveToFirebase === 'function') window.saveToFirebase();
+    }, 1000);
   }
 
   window.DB.forEach(d => { d._estatus = window.normEstatus(d._estatus); });
@@ -75,13 +78,13 @@ window.saveToFirebase = function() {
     const payload = {
       DB:       window.DB,
       RDB:      window.RDB,
-      SNAPS:    window.SNAPS,   // Guardar TODOS los snapshots, sin truncar
-      pptxFile: window.pptxFile,
-      xlsxFile: window.xlsxFile,
-      savedAt:  new Date().toISOString(),
+      SNAPS:    window.SNAPS,
+      pptxFile: window.pptxFile || '',
+      xlsxFile: window.xlsxFile || '',
+      savedAt:  new Date().toISOString() + '_' + Math.random().toString(36).slice(2,7),
     };
     set(ref(db, 'pmo'), payload)
-      .then(() => console.log('✅ Firebase: datos guardados · ' + window.SNAPS.length + ' snapshots'))
+      .then(() => console.log('✅ Firebase: guardado · ' + (window.SNAPS||[]).length + ' snapshots'))
       .catch(e  => console.error('❌ Firebase error:', e));
   } catch(e) {
     console.error('Firebase saveToFirebase error:', e);
