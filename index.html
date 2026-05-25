@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v7.4 - firebase restores data, no excel auto-reload, SNAPS preserved - 2026-05-25 -->
+<!-- v7.5 - firebase sync SNAPS+DB+RDB correctly - 2026-05-25 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -32,19 +32,13 @@ window._fbRef = ref;
 window._fbSet = set;
 
 // ── Firebase: sincroniza datos entre todos los usuarios ──────────────────────
-// Al abrir: restaura DB/RDB/SNAPS desde Firebase (datos que subió la admin)
-// NO recarga el Excel automáticamente — eso es manual
 const pmoRef = ref(db, 'pmo');
-let _fbFirstLoad = true;
 onValue(pmoRef, (snapshot) => {
   const data = snapshot.val();
-  if (!data) {
-    _fbFirstLoad = false;
-    return;
-  }
+  if (!data) return;
 
   // Ignorar si los datos son iguales
-  const incomingHash = JSON.stringify({ db: data.DB?.length, rdb: data.RDB?.length, ts: data.savedAt });
+  const incomingHash = JSON.stringify({ db: data.DB?.length, rdb: data.RDB?.length, snaps: data.SNAPS?.length, ts: data.savedAt });
   if (window._lastFbHash === incomingHash) return;
   window._lastFbHash = incomingHash;
 
@@ -52,23 +46,28 @@ onValue(pmoRef, (snapshot) => {
   window.DB  = data.DB  || [];
   window.RDB = data.RDB || [];
 
-  // Preservar el histórico más completo (local vs remoto)
+  // SNAPS: conservar siempre el historial más completo
   const remoteSNAPS = data.SNAPS || [];
   const localSNAPS  = window.SNAPS || [];
-  window.SNAPS = remoteSNAPS.length >= localSNAPS.length ? remoteSNAPS : localSNAPS;
+  if (remoteSNAPS.length >= localSNAPS.length) {
+    window.SNAPS = remoteSNAPS;
+  }
+  // Si el local tiene más, subir el local a Firebase para sincronizar
+  else if (localSNAPS.length > remoteSNAPS.length && typeof window.saveToFirebase === 'function') {
+    window.saveToFirebase();
+  }
 
-  // NO restaurar xlsxFile ni pptxFile para evitar recargas automáticas del Excel
   window.DB.forEach(d => { d._estatus = window.normEstatus(d._estatus); });
   window.deduplicateRDB();
 
   if (window.DB.length || window.SNAPS.length) {
     window.restoreUIFromData();
     window.refreshAllViews();
-    if (!_fbFirstLoad) {
+    if (window._fbReady) {
       window.toast('🔄 Datos actualizados en tiempo real');
     }
+    window._fbReady = true;
   }
-  _fbFirstLoad = false;
 });
 
 // ── Función global para guardar en Firebase ─────────────────────────────────
