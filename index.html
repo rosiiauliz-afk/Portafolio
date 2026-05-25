@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v8.0 - fix null btn refs, SNAPS render fixed - 2026-05-25 -->
+<!-- v8.1 - saveSnap calls Firebase directly, renderSnaps exposed, SNAPS sync fixed - 2026-05-25 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -64,6 +64,8 @@ onValue(pmoRef, (snapshot) => {
   if (window.DB.length || window.SNAPS.length) {
     window.restoreUIFromData();
     window.refreshAllViews();
+    // Siempre renderizar snapshots cuando llegan datos de Firebase
+    if (typeof window.renderSnaps === 'function') window.renderSnaps();
     if (window._fbReady) {
       window.toast('🔄 Datos actualizados en tiempo real');
     }
@@ -2671,7 +2673,15 @@ function saveSnap(){
   SNAPS.unshift({id:Date.now(),label:label||'Sin nombre',fecha:new Date().toISOString(),
     pptxFile,xlsxFile,data:JSON.parse(JSON.stringify(DB)),riesgos:JSON.parse(JSON.stringify(RDB)),
     stats:calcStats(DB,RDB)});
-  selSnaps=[];renderSnaps();saveToStorage();broadcastChange();toast('📸 Snapshot guardado: '+label+' · Visible para todos los usuarios');
+  selSnaps=[];
+  renderSnaps();
+  saveToStorage();
+  broadcastChange();
+  // Forzar subida inmediata a Firebase para que TODOS vean el snapshot
+  if (typeof window.saveToFirebase === 'function') {
+    setTimeout(() => window.saveToFirebase(), 300);
+  }
+  toast('📸 Snapshot guardado: '+label+' · Subiendo a Firebase para todos los usuarios...');
 }
 function renderSnaps(){
   const list=document.getElementById('snapList');
@@ -4031,6 +4041,7 @@ window.deduplicateRDB    = deduplicateRDB;
 window.restoreUIFromData = restoreUIFromData;
 window.refreshAllViews   = refreshAllViews;
 window.toast             = toast;
+window.renderSnaps       = renderSnaps;
 </script>
 </body>
 </html>
