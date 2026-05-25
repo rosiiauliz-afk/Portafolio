@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v7.3 - firebase first-load ignored - manual only - prioridad TI - 2026-05-25 -->
+<!-- v7.4 - firebase restores data, no excel auto-reload, SNAPS preserved - 2026-05-25 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -31,44 +31,44 @@ window._fbDB  = db;
 window._fbRef = ref;
 window._fbSet = set;
 
-// ── Firebase: solo escucha cambios de OTROS usuarios (no restaura al abrir) ──
-// La carga inicial siempre es MANUAL — esto protege el histórico de snapshots
+// ── Firebase: sincroniza datos entre todos los usuarios ──────────────────────
+// Al abrir: restaura DB/RDB/SNAPS desde Firebase (datos que subió la admin)
+// NO recarga el Excel automáticamente — eso es manual
 const pmoRef = ref(db, 'pmo');
 let _fbFirstLoad = true;
 onValue(pmoRef, (snapshot) => {
-  // Ignorar la primera carga automática de Firebase al abrir la app
-  // Solo procesar cambios que vienen de OTROS usuarios después de la carga inicial
-  if (_fbFirstLoad) {
+  const data = snapshot.val();
+  if (!data) {
     _fbFirstLoad = false;
-    console.log('🔥 Firebase: primera carga ignorada — esperando acción manual del usuario');
     return;
   }
 
-  const data = snapshot.val();
-  if (!data) return;
-
-  // Ignorar si los datos son iguales a los actuales
+  // Ignorar si los datos son iguales
   const incomingHash = JSON.stringify({ db: data.DB?.length, rdb: data.RDB?.length, ts: data.savedAt });
   if (window._lastFbHash === incomingHash) return;
   window._lastFbHash = incomingHash;
 
-  // Aplicar datos remotos al estado local
-  window.DB    = data.DB  || [];
-  window.RDB   = data.RDB || [];
+  // Restaurar DB y RDB desde Firebase
+  window.DB  = data.DB  || [];
+  window.RDB = data.RDB || [];
 
-  // Preservar el histórico más completo
+  // Preservar el histórico más completo (local vs remoto)
   const remoteSNAPS = data.SNAPS || [];
   const localSNAPS  = window.SNAPS || [];
   window.SNAPS = remoteSNAPS.length >= localSNAPS.length ? remoteSNAPS : localSNAPS;
 
+  // NO restaurar xlsxFile ni pptxFile para evitar recargas automáticas del Excel
   window.DB.forEach(d => { d._estatus = window.normEstatus(d._estatus); });
   window.deduplicateRDB();
 
   if (window.DB.length || window.SNAPS.length) {
     window.restoreUIFromData();
     window.refreshAllViews();
-    window.toast('🔄 Datos actualizados por otro usuario');
+    if (!_fbFirstLoad) {
+      window.toast('🔄 Datos actualizados en tiempo real');
+    }
   }
+  _fbFirstLoad = false;
 });
 
 // ── Función global para guardar en Firebase ─────────────────────────────────
