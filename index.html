@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v7.9 - remove local load buttons, 30s poll fallback, Sincronizar only - 2026-05-25 -->
+<!-- v8.0 - fix null btn refs, SNAPS render fixed - 2026-05-25 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -1227,11 +1227,11 @@ function afterLoad(type, filename, count) {
     .textContent = `✅ ${filename} · ${count} ${label}`;
   document.getElementById(`dz-${type === 'pptx' ? 'pptx' : 'excel'}`).classList.add('dz-loaded');
 
-  // Sidebar
+  // Sidebar — botones opcionales (pueden no existir si se quitaron)
   const btn = type === 'pptx' ? document.getElementById('btnPptx') : document.getElementById('btnExcel');
-  btn.classList.add('done');
+  if (btn) btn.classList.add('done');
   const txt = type === 'pptx' ? document.getElementById('txtPptx') : document.getElementById('txtExcel');
-  txt.textContent = '↺ Recargar ' + (type === 'pptx' ? 'PPTX' : 'Excel');
+  if (txt) txt.textContent = '↺ Recargar ' + (type === 'pptx' ? 'PPTX' : 'Excel');
 
   // File info
   const parts = [];
@@ -2915,13 +2915,22 @@ function restoreUIFromData() {
     document.getElementById('dashboard').style.display='block';
     document.getElementById('dash-sub').textContent =
       `Sesión restaurada · ${DB.length} iniciativas · ${RDB.length} riesgos · ${SNAPS.length} snapshots`;
-    if (pptxFile) { document.getElementById('btnPptx').classList.add('done'); document.getElementById('txtPptx').textContent='↺ Recargar PPTX'; }
-    if (xlsxFile) { document.getElementById('btnExcel').classList.add('done'); document.getElementById('txtExcel').textContent='↺ Recargar Excel'; }
+    // Botones opcionales — pueden no existir si se quitaron del sidebar
+    const btnPptx = document.getElementById('btnPptx');
+    const txtPptx = document.getElementById('txtPptx');
+    const btnExcel = document.getElementById('btnExcel');
+    const txtExcel = document.getElementById('txtExcel');
+    if (pptxFile && btnPptx) { btnPptx.classList.add('done'); }
+    if (pptxFile && txtPptx) { txtPptx.textContent='↺ Recargar PPTX'; }
+    if (xlsxFile && btnExcel) { btnExcel.classList.add('done'); }
+    if (xlsxFile && txtExcel) { txtExcel.textContent='↺ Recargar Excel'; }
     const parts=[];
     if(pptxFile) parts.push('📑 '+pptxFile+' ('+DB.filter(d=>d._source==='pptx').length+')');
     if(xlsxFile) parts.push('📗 '+xlsxFile+' ('+DB.filter(d=>d._source==='excel').length+')');
-    document.getElementById('fileInfo').textContent = parts.join('\n')+'\n'+DB.length+' total';
-    document.getElementById('btnSnap').disabled = false;
+    const fi = document.getElementById('fileInfo');
+    if(fi) fi.textContent = parts.join('\n')+(parts.length?'\n':'')+DB.length+' total';
+    const btnSnap = document.getElementById('btnSnap');
+    if(btnSnap) btnSnap.disabled = false;
     renderDash();
     populateFilters();
     applyFilters();
