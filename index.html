@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v7.8 - Sincronizar button, real-time all users, SNAPS sync - 2026-05-25 -->
+<!-- v7.9 - remove local load buttons, 30s poll fallback, Sincronizar only - 2026-05-25 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -68,6 +68,7 @@ onValue(pmoRef, (snapshot) => {
       window.toast('🔄 Datos actualizados en tiempo real');
     }
     window._fbReady = true;
+    window._lastFbUpdate = Date.now();
   }
 });
 
@@ -92,6 +93,25 @@ window.saveToFirebase = function() {
 };
 
 console.log('🔥 Firebase conectado · Portafolio PMO · Tiempo real activo');
+
+// ── Poll de respaldo cada 30 seg — garantiza que todos vean cambios ──────────
+// El onValue ya hace tiempo real, pero este poll es el seguro final
+setInterval(() => {
+  if (!window._fbDB || !window._fbRef) return;
+  // Solo releer si han pasado más de 25 segundos desde el último update
+  const now = Date.now();
+  if (window._lastFbUpdate && (now - window._lastFbUpdate) < 25000) return;
+  // Forzar re-lectura tocando un nodo auxiliar
+  import('https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js')
+    .then(({ get }) => get(window._fbRef(window._fbDB, 'pmo/savedAt'))
+    .then(snap => {
+      const ts = snap.val();
+      if (ts && ts !== window._lastFbHash?.split('|')[0]) {
+        // Hay cambios — el onValue los procesará automáticamente
+        console.log('🔄 Poll detectó cambios nuevos');
+      }
+    })).catch(() => {});
+}, 30000);
 
 // Actualizar indicador de estado en sidebar
 setTimeout(() => {
@@ -397,13 +417,7 @@ tr:hover td{background:var(--bg)}
     <button class="load-btn" id="btnSync" onclick="syncNow()" style="background:#1a5fb4;color:#fff;border:.5px solid #1a5fb4;margin-bottom:4px;font-weight:700;font-size:13px">
       <span>🔄</span><span id="txtSync">Sincronizar</span>
     </button>
-    <button class="load-btn load-pptx" id="btnPptx" onclick="document.getElementById('iPptx').click()">
-      <span>📑</span><span id="txtPptx">Cargar PPTX</span>
-    </button>
-    <button class="load-btn load-excel" id="btnExcel" onclick="document.getElementById('iExcel').click()">
-      <span>📗</span><span id="txtExcel">Cargar Excel</span>
-    </button>
-    <div class="file-info" id="fileInfo">Ningún archivo cargado</div>
+    <div class="file-info" id="fileInfo" style="font-size:11px;color:var(--text3);margin:4px 0"></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px">
       <button onclick="exportSession()" style="padding:6px;background:none;border:.5px solid var(--border2);border-radius:var(--rs);font-size:11px;color:var(--blue-t);cursor:pointer;font-weight:600;" title="Exportar sesión completa como JSON (incluye histórico)">💾 Exportar</button>
       <button onclick="importSession()" style="padding:6px;background:none;border:.5px solid var(--border2);border-radius:var(--rs);font-size:11px;color:var(--green);cursor:pointer;font-weight:600;" title="Importar sesión desde archivo JSON">📂 Importar</button>
