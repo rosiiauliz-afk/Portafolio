@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v7.7 - unique savedAt hash, SNAPS sync, real-time for all users - 2026-05-25 -->
+<!-- v7.8 - Sincronizar button, real-time all users, SNAPS sync - 2026-05-25 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -391,11 +391,11 @@ tr:hover td{background:var(--bg)}
     <!-- SYNC STATUS BADGE -->
     <div id="syncBadge" style="display:none;align-items:center;gap:6px;padding:7px 10px;border-radius:var(--rs);font-size:11px;font-weight:600;margin-bottom:2px;background:var(--green-bg);color:var(--green);border:.5px solid rgba(45,106,31,.25)">
       <span id="syncDot" style="width:7px;height:7px;border-radius:50%;background:var(--green);flex-shrink:0;animation:pulse 2s infinite"></span>
-      <span id="syncText">Sincronizado</span>
+      <span id="syncText">Sincronizar</span>
       <button onclick="syncNow()" title="Sincronizar ahora" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:13px;padding:0;line-height:1">🔄</button>
     </div>
-    <button class="load-btn" id="btnSync" onclick="openSyncModal()" style="background:var(--purple-bg);color:var(--purple);border:.5px solid rgba(74,56,153,.25);margin-bottom:4px">
-      <span>🔗</span><span id="txtSync">Configurar URL automática</span>
+    <button class="load-btn" id="btnSync" onclick="syncNow()" style="background:#1a5fb4;color:#fff;border:.5px solid #1a5fb4;margin-bottom:4px;font-weight:700;font-size:13px">
+      <span>🔄</span><span id="txtSync">Sincronizar</span>
     </button>
     <button class="load-btn load-pptx" id="btnPptx" onclick="document.getElementById('iPptx').click()">
       <span>📑</span><span id="txtPptx">Cargar PPTX</span>
@@ -2932,11 +2932,10 @@ window.addEventListener('DOMContentLoaded', () => {
   // — Sync: inicializar badge — la carga es SOLO MANUAL via botón Sincronizar —
   const cfg = getSyncConfig();
   if (cfg.excelUrl || cfg.pptxUrl) {
-    document.getElementById('txtSync').textContent = '✓ Sincronización activa';
-    document.getElementById('btnSync').style.background = 'var(--green-bg)';
-    document.getElementById('btnSync').style.color = 'var(--green)';
+    document.getElementById('txtSync').textContent = 'Sincronizar';
+    document.getElementById('btnSync').style.background = '#1a5fb4';
+    document.getElementById('btnSync').style.color = '#fff';
     // ❌ Auto-carga desactivada — protege el histórico de Snapshots
-    // Para actualizar datos presiona el botón 🔄 Sincronizar manualmente
     updateSyncBadge('ok');
   }
 });
@@ -3103,9 +3102,13 @@ function clearSyncConfig() {
 // Sincronizar ahora (botón 🔄)
 async function syncNow() {
   const cfg = getSyncConfig();
-  if (!cfg.excelUrl && !cfg.pptxUrl) { toast('No hay URL configurada', 'error'); return; }
+  if (!cfg.excelUrl && !cfg.pptxUrl) { toast('No hay URL configurada. Ve a configuración de sync.', 'error'); return; }
   updateSyncBadge('loading');
   await loadFromUrls(cfg);
+  // Forzar guardado en Firebase con timestamp único para notificar a TODOS los usuarios
+  if (typeof window.saveToFirebase === 'function') {
+    setTimeout(() => window.saveToFirebase(), 500);
+  }
 }
 
 // Estado visual del badge
@@ -3117,9 +3120,9 @@ function updateSyncBadge(state) {
 
   if (state === 'none') {
     badge.style.display = 'none';
-    btn.style.background = 'var(--purple-bg)';
-    btn.style.color = 'var(--purple)';
-    document.getElementById('txtSync').textContent = 'Configurar URL automática';
+    btn.style.background = '#1a5fb4';
+    btn.style.color = '#fff';
+    document.getElementById('txtSync').textContent = 'Sincronizar';
     return;
   }
   badge.style.display = 'flex';
@@ -3127,7 +3130,7 @@ function updateSyncBadge(state) {
     badge.style.background = 'var(--blue-bg)'; badge.style.color = 'var(--blue-t)';
     badge.style.borderColor = 'rgba(26,95,180,.2)';
     dot.style.background = 'var(--blue)'; dot.style.animation = 'pulse .8s infinite';
-    text.textContent = 'Cargando datos…';
+    text.textContent = 'Sincronizando…';
     btn.style.background = 'var(--blue-bg)'; btn.style.color = 'var(--blue-t)';
     document.getElementById('txtSync').textContent = 'Sincronizando…';
   } else if (state === 'ok') {
@@ -3136,8 +3139,8 @@ function updateSyncBadge(state) {
     dot.style.background = 'var(--green)'; dot.style.animation = 'pulse 2s infinite';
     const now = new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
     text.textContent = 'Sincronizado ' + now;
-    btn.style.background = 'var(--green-bg)'; btn.style.color = 'var(--green)';
-    document.getElementById('txtSync').textContent = '✓ Sincronización activa';
+    btn.style.background = '#1a5fb4'; btn.style.color = '#fff';
+    document.getElementById('txtSync').textContent = 'Sincronizar';
   } else if (state === 'error') {
     badge.style.background = 'var(--red-bg)'; badge.style.color = 'var(--red)';
     badge.style.borderColor = 'rgba(160,52,43,.2)';
