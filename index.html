@@ -4,14 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v8.1 - saveSnap calls Firebase directly, renderSnaps exposed, SNAPS sync fixed - 2026-05-25 -->
+<!-- v10.0 - obs Luis + control cambios + weeklyTI + retraso + cols drag + nav graficos - 2026-06-04 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Firebase SDK -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getDatabase, ref, set, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import { getDatabase, ref, set, onValue, off, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword, updatePassword } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDLFHlSj2wrH96oSnuXDQTvsQkLUfO6ni8",
@@ -23,56 +24,212 @@ const firebaseConfig = {
   appId: "1:213419130820:web:732adfc1c221c0e7c0ae91"
 };
 
-const app = initializeApp(firebaseConfig);
-const db  = getDatabase(app);
+const app  = initializeApp(firebaseConfig);
+const db   = getDatabase(app);
+const auth = getAuth(app);
 
-// ── Exponer funciones Firebase al scope global ──────────────────────────────
+// ── Exponer al scope global ──────────────────────────────────────────────────
 window._fbDB  = db;
 window._fbRef = ref;
 window._fbSet = set;
+window._fbAuth = auth;
 
-// ── Firebase: sincroniza datos entre todos los usuarios en tiempo real ────────
-const pmoRef = ref(db, 'pmo');
-onValue(pmoRef, (snapshot) => {
-  const data = snapshot.val();
-  if (!data) return;
+// ── ROLES y PERMISOS ─────────────────────────────────────────────────────────
+const ROLES = {
+  admin:  { label: 'Admin',  color: '#1a5fb4', canSync: true,  canExport: true,  canManageUsers: true,  fullAccess: true  },
+  pm:     { label: 'PM',     color: '#27ae60', canSync: false, canExport: true,  canManageUsers: false, fullAccess: true  },
+  viewer: { label: 'Viewer', color: '#7f8c8d', canSync: false, canExport: false, canManageUsers: false, fullAccess: false },
+};
+window._currentUser = null;
+window._currentRole = null;
 
-  // Hash completo: timestamp + contenido — detecta CUALQUIER cambio
-  const incomingHash = data.savedAt + '|' + (data.DB?.length||0) + '|' + (data.SNAPS?.length||0);
-  if (window._lastFbHash === incomingHash) return;
-  window._lastFbHash = incomingHash;
-
-  // Restaurar DB y RDB desde Firebase
-  window.DB  = data.DB  || [];
-  window.RDB = data.RDB || [];
-
-  // SNAPS: conservar siempre el historial más completo
-  const remoteSNAPS = data.SNAPS || [];
-  const localSNAPS  = window.SNAPS || [];
-  if (remoteSNAPS.length >= localSNAPS.length) {
-    window.SNAPS = remoteSNAPS;
-  } else {
-    // Local tiene más snapshots — subir a Firebase para que todos los vean
-    setTimeout(() => {
-      if (typeof window.saveToFirebase === 'function') window.saveToFirebase();
-    }, 1000);
+// ── Aplicar restricciones de rol ─────────────────────────────────────────────
+window.applyRoleRestrictions = function() {
+  const role = window._currentRoleData || {};
+  // Botón sincronizar — solo Admin
+  const btnSync = document.getElementById('btnSync');
+  if (btnSync) {
+    btnSync.style.display = role.canSync ? '' : 'none';
   }
+  // Botones exportar — Admin y PM
+  document.querySelectorAll('[onclick*="exportGraficos"],[onclick*="openExportModal"],[onclick*="exportReport"]').forEach(b => {
+    b.style.display = role.canExport ? '' : 'none';
+  });
+  // Menú usuarios — solo Admin
+  const navUsers = document.getElementById('nav-usuarios');
+  if (navUsers) navUsers.style.display = role.canManageUsers ? '' : 'none';
+  // Mostrar nombre y rol del usuario
+  const userBadge = document.getElementById('user-badge');
+  if (userBadge && window._currentUser) {
+    userBadge.textContent = (window._currentUser.displayName || window._currentUser.email?.split('@')[0] || 'Usuario') + ' · ' + (role.label||'');
+    userBadge.style.display = '';
+  }
+};
 
-  window.DB.forEach(d => { d._estatus = window.normEstatus(d._estatus); });
-  window.deduplicateRDB();
-
-  if (window.DB.length || window.SNAPS.length) {
-    window.restoreUIFromData();
-    window.refreshAllViews();
-    // Siempre renderizar snapshots cuando llegan datos de Firebase
-    if (typeof window.renderSnaps === 'function') window.renderSnaps();
-    if (window._fbReady) {
-      window.toast('🔄 Datos actualizados en tiempo real');
-    }
-    window._fbReady = true;
-    window._lastFbUpdate = Date.now();
+// ── Auth state observer ───────────────────────────────────────────────────────
+onAuthStateChanged(auth, async (user) => {
+  if (user) {
+    window._currentUser = user;
+    // Leer rol del usuario desde Firebase
+    const roleSnap = await get(ref(db, 'users/' + user.uid + '/role'));
+    const roleName  = roleSnap.val() || 'viewer';
+    window._currentRole     = roleName;
+    window._currentRoleData = ROLES[roleName] || ROLES.viewer;
+    // Ocultar login, mostrar app
+    const loginScreen = document.getElementById('login-screen');
+    if (loginScreen) loginScreen.style.display = 'none';
+    const appRoot = document.getElementById('app-root');
+    if (appRoot) appRoot.style.display = '';
+    window.applyRoleRestrictions();
+    window.toast('👋 Bienvenido, ' + (user.displayName || user.email?.split('@')[0]) + ' · ' + (ROLES[roleName]?.label || roleName));
+    // Iniciar escucha de datos
+    startDataSync();
+  } else {
+    window._currentUser = null;
+    window._currentRole = null;
+    window._currentRoleData = null;
+    const loginScreen = document.getElementById('login-screen');
+    if (loginScreen) loginScreen.style.display = '';
+    const appRoot = document.getElementById('app-root');
+    if (appRoot) appRoot.style.display = 'none';
   }
 });
+
+// ── Login ─────────────────────────────────────────────────────────────────────
+window.doLogin = async function() {
+  const email = document.getElementById('login-email').value.trim();
+  const pass  = document.getElementById('login-pass').value;
+  const errEl = document.getElementById('login-error');
+  if (!email || !pass) { errEl.textContent = 'Ingresa correo y contraseña'; return; }
+  errEl.textContent = '';
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true; btn.textContent = 'Entrando...';
+  try {
+    await signInWithEmailAndPassword(auth, email, pass);
+  } catch(e) {
+    const msgs = {
+      'auth/user-not-found': 'Usuario no encontrado',
+      'auth/wrong-password': 'Contraseña incorrecta',
+      'auth/invalid-email': 'Correo inválido',
+      'auth/too-many-requests': 'Demasiados intentos. Intenta más tarde.',
+      'auth/invalid-credential': 'Correo o contraseña incorrectos',
+    };
+    errEl.textContent = msgs[e.code] || 'Error: ' + e.message;
+    btn.disabled = false; btn.textContent = 'Entrar';
+  }
+};
+
+// ── Logout ────────────────────────────────────────────────────────────────────
+window.doLogout = async function() {
+  if (!confirm('¿Cerrar sesión?')) return;
+  await signOut(auth);
+};
+
+// ── Crear usuario (Admin) ─────────────────────────────────────────────────────
+window.createUser = async function() {
+  const email = document.getElementById('nu-email').value.trim();
+  const pass  = document.getElementById('nu-pass').value;
+  const name  = document.getElementById('nu-name').value.trim();
+  const role  = document.getElementById('nu-role').value;
+  const errEl = document.getElementById('nu-error');
+  if (!email || !pass || !name) { errEl.textContent = 'Completa todos los campos'; return; }
+  if (pass.length < 6) { errEl.textContent = 'La contraseña debe tener al menos 6 caracteres'; return; }
+  errEl.textContent = '';
+  try {
+    // Crear usuario en Firebase Auth (usando REST API para no cerrar sesión del admin)
+    const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyDLFHlSj2wrH96oSnuXDQTvsQkLUfO6ni8`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: pass, returnSecureToken: true })
+    });
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+    // Guardar nombre y rol en Realtime Database
+    await set(ref(db, 'users/' + data.localId), {
+      email, name, role, createdAt: new Date().toISOString(), createdBy: window._currentUser?.email
+    });
+    window.toast('✅ Usuario creado: ' + name + ' (' + ROLES[role]?.label + ')');
+    document.getElementById('nu-email').value = '';
+    document.getElementById('nu-pass').value  = '';
+    document.getElementById('nu-name').value  = '';
+    window.loadUsersList();
+  } catch(e) {
+    const msgs = {
+      'EMAIL_EXISTS': 'Este correo ya está registrado',
+      'WEAK_PASSWORD : Password should be at least 6 characters': 'Contraseña muy corta (mín. 6 caracteres)',
+    };
+    errEl.textContent = msgs[e.message] || 'Error: ' + e.message;
+  }
+};
+
+// ── Cargar lista de usuarios ──────────────────────────────────────────────────
+window.loadUsersList = async function() {
+  const container = document.getElementById('users-list');
+  if (!container) return;
+  container.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:8px">Cargando...</div>';
+  const snap = await get(ref(db, 'users'));
+  const users = snap.val() || {};
+  if (!Object.keys(users).length) {
+    container.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:8px">Sin usuarios registrados aún</div>';
+    return;
+  }
+  container.innerHTML = Object.entries(users).map(([uid, u]) => `
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface2);border-radius:var(--rs);border:.5px solid var(--border);margin-bottom:6px">
+      <span style="font-size:20px">👤</span>
+      <div style="flex:1">
+        <div style="font-size:13px;font-weight:600">${u.name||'Sin nombre'}</div>
+        <div style="font-size:11px;color:var(--text3)">${u.email}</div>
+      </div>
+      <span style="padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;background:${ROLES[u.role]?.color||'#888'}22;color:${ROLES[u.role]?.color||'#888'}">${ROLES[u.role]?.label||u.role}</span>
+      <select onchange="changeUserRole('${uid}', this.value)" style="font-size:11px;padding:3px 6px;border:.5px solid var(--border2);border-radius:var(--rs);height:26px">
+        ${Object.entries(ROLES).map(([k,v])=>`<option value="${k}"${k===u.role?' selected':''}>${v.label}</option>`).join('')}
+      </select>
+      <button onclick="deleteUserRecord('${uid}')" style="background:none;border:.5px solid #f44336;color:#f44336;border-radius:var(--rs);padding:3px 8px;font-size:11px;cursor:pointer">🗑️</button>
+    </div>`).join('');
+};
+
+window.changeUserRole = async function(uid, role) {
+  await set(ref(db, 'users/' + uid + '/role'), role);
+  window.toast('✅ Rol actualizado');
+};
+
+window.deleteUserRecord = async function(uid) {
+  if (!confirm('¿Eliminar este usuario del sistema?')) return;
+  await set(ref(db, 'users/' + uid), null);
+  window.loadUsersList();
+  window.toast('🗑️ Usuario eliminado');
+};
+
+// ── Sincronización de datos ───────────────────────────────────────────────────
+function startDataSync() {
+  const pmoRef = ref(db, 'pmo');
+  onValue(pmoRef, (snapshot) => {
+    const data = snapshot.val();
+    if (!data) return;
+    const incomingHash = data.savedAt + '|' + (data.DB?.length||0) + '|' + (data.SNAPS?.length||0);
+    if (window._lastFbHash === incomingHash) return;
+    window._lastFbHash = incomingHash;
+    window.DB  = data.DB  || [];
+    window.RDB = data.RDB || [];
+    const remoteSNAPS = data.SNAPS || [];
+    const localSNAPS  = window.SNAPS || [];
+    if (remoteSNAPS.length >= localSNAPS.length) {
+      window.SNAPS = remoteSNAPS;
+    } else {
+      setTimeout(() => { if (typeof window.saveToFirebase === 'function') window.saveToFirebase(); }, 1000);
+    }
+    window.DB.forEach(d => { d._estatus = window.normEstatus(d._estatus); });
+    window.deduplicateRDB();
+    if (window.DB.length || window.SNAPS.length) {
+      window.restoreUIFromData();
+      window.refreshAllViews();
+      if (typeof window.renderSnaps === 'function') window.renderSnaps();
+      if (window._fbReady) window.toast('🔄 Datos actualizados en tiempo real');
+      window._fbReady = true;
+      window._lastFbUpdate = Date.now();
+    }
+  });
+}
 
 // ── Función global para guardar en Firebase ─────────────────────────────────
 window.saveToFirebase = function() {
@@ -94,25 +251,16 @@ window.saveToFirebase = function() {
   }
 };
 
-console.log('🔥 Firebase conectado · Portafolio PMO · Tiempo real activo');
+console.log('🔥 Firebase Auth + DB conectado · PMO Portafolio TI');
 
-// ── Poll de respaldo cada 30 seg — garantiza que todos vean cambios ──────────
-// El onValue ya hace tiempo real, pero este poll es el seguro final
+// ── Poll de respaldo cada 30 seg ─────────────────────────────────────────────
 setInterval(() => {
-  if (!window._fbDB || !window._fbRef) return;
-  // Solo releer si han pasado más de 25 segundos desde el último update
+  if (!window._fbDB || !window._fbRef || !window._currentUser) return;
   const now = Date.now();
   if (window._lastFbUpdate && (now - window._lastFbUpdate) < 25000) return;
-  // Forzar re-lectura tocando un nodo auxiliar
   import('https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js')
     .then(({ get }) => get(window._fbRef(window._fbDB, 'pmo/savedAt'))
-    .then(snap => {
-      const ts = snap.val();
-      if (ts && ts !== window._lastFbHash?.split('|')[0]) {
-        // Hay cambios — el onValue los procesará automáticamente
-        console.log('🔄 Poll detectó cambios nuevos');
-      }
-    })).catch(() => {});
+    .then(snap => { const ts = snap.val(); if (ts && ts !== window._lastFbHash?.split('|')[0]) console.log('🔄 Poll detectó cambios'); })).catch(() => {});
 }, 30000);
 
 // Actualizar indicador de estado en sidebar
@@ -121,12 +269,9 @@ setTimeout(() => {
   const txt = document.getElementById('fb-txt');
   const box = document.getElementById('fb-status');
   if (dot && txt && box) {
-    dot.style.background = '#4caf50';
-    dot.style.animation  = 'none';
-    txt.textContent      = '🔥 Firebase · Tiempo real activo';
-    box.style.background = '#e8f5e9';
-    box.style.borderColor= '#a5d6a7';
-    box.style.color      = '#1b5e20';
+    dot.style.background = '#4caf50'; dot.style.animation = 'none';
+    txt.textContent = '🔥 Firebase · Tiempo real activo';
+    box.style.background = '#e8f5e9'; box.style.borderColor = '#a5d6a7'; box.style.color = '#1b5e20';
   }
 }, 2000);
 </script>
@@ -387,6 +532,33 @@ tr:hover td{background:var(--bg)}
 </style>
 </head>
 <body>
+<!-- ══ PANTALLA DE LOGIN ══════════════════════════════════════════════════════ -->
+<div id="login-screen" style="position:fixed;inset:0;background:linear-gradient(135deg,#0d3b78,#1a5fb4);display:flex;align-items:center;justify-content:center;z-index:9999">
+  <div style="background:#fff;border-radius:16px;padding:2.5rem 2rem;width:360px;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+    <div style="text-align:center;margin-bottom:1.75rem">
+      <div style="font-size:40px;margin-bottom:8px">📊</div>
+      <div style="font-size:20px;font-weight:900;color:#0d3b78">PMO · TI</div>
+      <div style="font-size:12px;color:#a8a6a0;margin-top:4px">Gestión de Portafolio</div>
+    </div>
+    <div style="margin-bottom:12px">
+      <label style="font-size:11px;font-weight:700;color:#6b6a65;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Correo electrónico</label>
+      <input id="login-email" type="email" placeholder="usuario@empresa.com" onkeydown="if(event.key===Enter)document.getElementById(login-pass).focus()"
+        style="width:100%;padding:10px 12px;border:1.5px solid #e0ddd8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box">
+    </div>
+    <div style="margin-bottom:16px">
+      <label style="font-size:11px;font-weight:700;color:#6b6a65;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Contraseña</label>
+      <input id="login-pass" type="password" placeholder="••••••••" onkeydown="if(event.key===Enter)doLogin()"
+        style="width:100%;padding:10px 12px;border:1.5px solid #e0ddd8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box">
+    </div>
+    <div id="login-error" style="color:#c0392b;font-size:12px;margin-bottom:10px;min-height:16px;text-align:center"></div>
+    <button id="login-btn" onclick="doLogin()"
+      style="width:100%;padding:12px;background:#1a5fb4;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer">
+      Entrar
+    </button>
+  </div>
+</div>
+<!-- ══ APLICACIÓN ════════════════════════════════════════════════════════════ -->
+<div id="app-root" style="display:none">
 <div class="app">
 
 <!-- ══ SIDEBAR ══ -->
@@ -394,6 +566,7 @@ tr:hover td{background:var(--bg)}
   <div class="brand">
     <div class="brand-name">PMO · TI</div>
     <div class="brand-sub">Gestión de Portafolio</div>
+    <div id="user-badge" style="display:none;font-size:10px;font-weight:700;color:var(--blue-t);background:var(--blue-bg);padding:3px 8px;border-radius:4px;margin-top:6px;text-align:center"></div>
   </div>
   <nav>
     <button class="nav-btn active" onclick="goPage('inicio',this)"><span class="nav-icon">🏠</span>Inicio</button>
@@ -402,6 +575,8 @@ tr:hover td{background:var(--bg)}
     <button class="nav-btn" onclick="goPage('graficos',this)"><span class="nav-icon">📊</span>Gráficos</button>
     <button class="nav-btn" onclick="goPage('riesgos',this)"><span class="nav-icon">⚠️</span>Inventario Riesgos</button>
     <button class="nav-btn" onclick="goPage('historico',this)"><span class="nav-icon">🕐</span>Histórico</button>
+    <button class="nav-btn" id="nav-usuarios" onclick="goPage('usuarios',this);window.loadUsersList()" style="display:none"><span class="nav-icon">👥</span>Usuarios</button>
+    <button class="nav-btn" onclick="doLogout()" style="margin-top:4px;color:var(--red);border-color:var(--red-bg)"><span class="nav-icon">🚪</span>Cerrar sesión</button>
   </nav>
   <div class="sidebar-footer">
     <!-- Indicador Firebase -->
@@ -499,18 +674,54 @@ tr:hover td{background:var(--bg)}
     </div>
     <div class="filters-bar">
       <input type="text" id="f-q" placeholder="🔍  Buscar..." oninput="applyFilters()">
-      <select id="f-tipo"    onchange="applyFilters()"><option value="">Todos los tipos</option></select>
-      <select id="f-estatus" onchange="applyFilters()"><option value="">Todos los estatus</option></select>
-      <select id="f-pm"      onchange="applyFilters()"><option value="">Todos los PM</option></select>
-      <select id="f-resp"    onchange="applyFilters()"><option value="">Todos los Resp. TI</option></select>
-      <select id="f-dev"     onchange="applyFilters()"><option value="">Todos los devs</option></select>
-      <select id="f-area"    onchange="applyFilters()"><option value="">Todas las áreas</option></select>
-      <select id="f-fase"    onchange="applyFilters()"><option value="">Todas las fases</option></select>
+      <select id="f-tipo" onchange="applyFilters()"><option value="">Todos los tipos</option></select>
+      <!-- Filtro estatus tipo pastilla -->
+      <div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center">
+        <button class="est-pill" data-val="" onclick="clickEstPill(this)"
+          style="padding:4px 11px;border-radius:20px;border:1.5px solid var(--blue);background:var(--blue-bg);color:var(--blue-t);font-size:12px;cursor:pointer;font-weight:700">
+          Todos
+        </button>
+        <button class="est-pill" data-val="Sin iniciar" onclick="clickEstPill(this)"
+          style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
+          ⚪ Sin iniciar
+        </button>
+        <button class="est-pill" data-val="En pausa" onclick="clickEstPill(this)"
+          style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
+          🟠 En pausa
+        </button>
+        <button class="est-pill" data-val="En tiempo" onclick="clickEstPill(this)"
+          style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
+          🟢 En tiempo
+        </button>
+        <button class="est-pill" data-val="En riesgo" onclick="clickEstPill(this)"
+          style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
+          🟡 En riesgo
+        </button>
+        <button class="est-pill" data-val="Con problema" onclick="clickEstPill(this)"
+          style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
+          🔴 Con problema
+        </button>
+        <button class="est-pill" data-val="Finalizado" onclick="clickEstPill(this)"
+          style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
+          ✅ Finalizado
+        </button>
+      </div>
+      <select id="f-pm"   onchange="applyFilters()"><option value="">Todos los PM</option></select>
+      <select id="f-resp" onchange="applyFilters()"><option value="">Todos los Resp. TI</option></select>
+      <select id="f-dev"  onchange="applyFilters()"><option value="">Todos los devs</option></select>
+      <select id="f-area" onchange="applyFilters()"><option value="">Todas las áreas</option></select>
+      <select id="f-fase" onchange="applyFilters()"><option value="">Todas las fases</option></select>
+      <select id="f-weeklyti" onchange="applyFilters()" title="Filtro Desarrollo TI">
+        <option value="">Todos (Dev TI)</option>
+        <option value="Si">⭐ Visible Weekly TI</option>
+        <option value="No">Sin Weekly TI</option>
+      </select>
       <button class="btn btn-ghost" onclick="clearFilters()">✕ Limpiar</button>
+      <button class="btn btn-ghost" onclick="openColConfig()" title="Configurar columnas" style="padding:6px 8px">⚙️ Cols</button>
     </div>
     <div class="table-card">
       <div class="table-top"><span class="table-count" id="tbl-count">—</span></div>
-      <div class="table-wrap"><table><thead id="tHead"></thead><tbody id="tBody"></tbody></table></div>
+      <div class="table-wrap"><table id="main-table"><thead id="tHead"></thead><tbody id="tBody"></tbody></table></div>
     </div>
   </div>
 
@@ -602,8 +813,69 @@ tr:hover td{background:var(--bg)}
       <div style="margin-top:1.5rem" id="compDiff"></div>
     </div>
   </div>
+  <!-- USUARIOS -->
+  <div class="page" id="page-usuarios">
+    <div class="page-header">
+      <div><div class="page-title">Usuarios</div><div class="page-sub">Gestión de acceso y roles</div></div>
+    </div>
+    <!-- Crear nuevo usuario -->
+    <div style="background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:1.5rem;margin-bottom:1.25rem;box-shadow:var(--shadow)">
+      <div style="font-size:13px;font-weight:700;margin-bottom:1rem">➕ Crear nuevo usuario</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+        <div>
+          <label style="font-size:11px;font-weight:700;color:var(--text3);display:block;margin-bottom:4px">Nombre completo</label>
+          <input id="nu-name" type="text" placeholder="Ej: María García" class="form-input" style="width:100%;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:var(--text3);display:block;margin-bottom:4px">Correo electrónico</label>
+          <input id="nu-email" type="email" placeholder="usuario@empresa.com" class="form-input" style="width:100%;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:var(--text3);display:block;margin-bottom:4px">Contraseña inicial</label>
+          <input id="nu-pass" type="password" placeholder="Mínimo 6 caracteres" class="form-input" style="width:100%;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:var(--text3);display:block;margin-bottom:4px">Rol</label>
+          <select id="nu-role" class="form-select" style="width:100%;box-sizing:border-box">
+            <option value="viewer">Viewer — Solo lectura</option>
+            <option value="pm">PM — Ve todo, no sincroniza</option>
+            <option value="admin">Admin — Acceso total</option>
+          </select>
+        </div>
+      </div>
+      <div id="nu-error" style="color:#c0392b;font-size:12px;min-height:16px;margin-bottom:8px"></div>
+      <button class="btn btn-primary" onclick="createUser()">➕ Crear usuario</button>
+    </div>
+    <!-- Lista de usuarios -->
+    <div style="background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:1.5rem;box-shadow:var(--shadow)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <div style="font-size:13px;font-weight:700">👥 Usuarios registrados</div>
+        <button class="btn btn-ghost" onclick="loadUsersList()">🔄 Actualizar</button>
+      </div>
+      <div id="users-list"><div style="color:var(--text3);font-size:13px">Cargando...</div></div>
+    </div>
+    <!-- Guía de roles -->
+    <div style="background:var(--blue-bg);border:.5px solid rgba(26,95,180,.2);border-radius:var(--r);padding:1.25rem;margin-top:1.25rem">
+      <div style="font-size:12px;font-weight:700;color:var(--blue-t);margin-bottom:8px">📋 Guía de roles</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-size:12px">
+        <div style="background:#fff;border-radius:var(--rs);padding:10px">
+          <div style="font-weight:700;color:#1a5fb4;margin-bottom:4px">🔵 Admin</div>
+          <div style="color:var(--text2)">Acceso total · Puede sincronizar Excel · Gestiona usuarios · Exporta reportes</div>
+        </div>
+        <div style="background:#fff;border-radius:var(--rs);padding:10px">
+          <div style="font-weight:700;color:#27ae60;margin-bottom:4px">🟢 PM</div>
+          <div style="color:var(--text2)">Ve todos los datos · Exporta reportes · No puede sincronizar ni gestionar usuarios</div>
+        </div>
+        <div style="background:#fff;border-radius:var(--rs);padding:10px">
+          <div style="font-weight:700;color:#7f8c8d;margin-bottom:4px">⚫ Viewer</div>
+          <div style="color:var(--text2)">Solo lectura · No exporta · No sincroniza · Ideal para consulta</div>
+        </div>
+      </div>
+    </div>
+  </div>
 
 </main>
+</div><!-- /app-root -->
 </div>
 
 <!-- MODAL SYNC URL -->
@@ -781,6 +1053,41 @@ tr:hover td{background:var(--bg)}
   </div>
 </div>
 
+<!-- Modal configuración columnas -->
+<div class="overlay" id="ovColConfig">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-hdr"><span class="modal-title">⚙️ Configurar columnas</span>
+      <button class="modal-close" onclick="document.getElementById('ovColConfig').classList.remove('open')">×</button>
+    </div>
+    <div style="padding:16px">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Arrastra para reordenar · Desactiva para ocultar</div>
+      <div id="col-config-list" style="display:flex;flex-direction:column;gap:6px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="resetColConfig()">↺ Restablecer</button>
+      <button class="btn btn-primary" onclick="saveColConfig()">✅ Aplicar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal observaciones -->
+<div class="overlay" id="ovObs">
+  <div class="modal" style="max-width:500px">
+    <div class="modal-hdr"><span class="modal-title">💬 Observaciones Luis</span>
+      <button class="modal-close" onclick="document.getElementById('ovObs').classList.remove('open')">×</button>
+    </div>
+    <div style="padding:16px">
+      <div id="obs-proyecto-name" style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px"></div>
+      <div id="obs-historico" style="display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;margin-bottom:14px"></div>
+      <div style="display:flex;gap:8px">
+        <textarea id="obs-nueva" placeholder="Escribe una observación..." rows="2"
+          style="flex:1;padding:8px 10px;border:.5px solid var(--border2);border-radius:var(--rs);font-size:13px;resize:vertical;font-family:inherit"></textarea>
+        <button class="btn btn-primary" onclick="addObservacion()" style="align-self:flex-end">Agregar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -825,6 +1132,7 @@ function goPage(name, btn) {
   if (name === 'graficos' && DB.length)  renderCharts();
   if (name === 'riesgos')                { populateRFilters(); applyRFilters(); }
   if (name === 'historico')              renderSnaps();
+  if (name === 'usuarios')              { if(typeof window.loadUsersList==='function') window.loadUsersList(); }
 }
 
 // ══════════════════════════════════════════
@@ -1026,6 +1334,9 @@ const EXCEL_MAP = {
   _nombre:     ['nombre','name','iniciativa','proyecto','requerimiento','descripcion','descripción','titulo','título'],
   _estatus:    ['estatus','estado','status','semaforo','semáforo','estatus actual','estado actual'],
   _pm:         ['pm','p.m.','project manager','gestor','lider proyecto','líder proyecto','lider de proyecto','líder de proyecto','gerente proyecto','gerente de proyecto','responsable proyecto','responsable del proyecto','pm asignado','pm del proyecto'],
+  _obs:        ['observaciones luis','observaciones','observacion','observación','comentarios','comentarios luis','notas','obs luis','luis'],
+  _weeklyTI:   ['visible weekly ti','weekly ti','visible weekly','weekly','visible ti','visibilidad ti','dev ti'],
+  _retraso:    ['retraso','con retraso','retraso final','tuvo retraso','delayed','delay'],
   _tl:         ['tl','t.l.','tech lead','technical lead','lider tecnico','líder técnico','lider técnico','líder tecnico','lider tech','líder tech','responsable técnico','responsable tecnico','lead técnico','lead tecnico','tl asignado'],
   _resp:       ['responsable ti','responsable de ti','owner ti','lider ti','líder ti'],
   _dev:        ['desarrollador','desarrolladores','developer','dev','programador','ingeniero de software','asignado a','asignado','recurso asignado','recurso'],
@@ -1127,6 +1438,21 @@ async function loadExcel(buffer, filename) {
         if (field === '_avance') { rec[field] = parseInt(v)||0; }
         else { rec[field] = v || '—'; }
       }
+      // Normalizar _weeklyTI → 'Si' o 'No'
+      if (rec._weeklyTI && rec._weeklyTI !== '—') {
+        const w = rec._weeklyTI.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+        rec._weeklyTI = /^(s|si|yes|1|true|x)$/.test(w) ? 'Si' : 'No';
+      }
+      // Normalizar _retraso → 'Si' o 'No'
+      if (rec._retraso && rec._retraso !== '—') {
+        const r = rec._retraso.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+        rec._retraso = /^(s|si|yes|1|true|x)$/.test(r) ? 'Si' : 'No';
+      }
+      // _obs: mantener como texto libre (puede ser multilínea)
+      if (!rec._obs || rec._obs === '—') rec._obs = '';
+      // Histórico de observaciones: si ya existe en DB, preservar
+      const existing = DB.find(e => e._nombre === (rec._nombre||''));
+      if (existing && existing._obsHistorico) rec._obsHistorico = existing._obsHistorico;
       // Normalizar tipo a los 3 valores válidos
       rec._tipo = normTipo(rec._tipo);
       // Normalizar estatus al semáforo exacto
@@ -1529,7 +1855,11 @@ function goToDataFiltered(estatus, tipo) {
     const countEl = document.getElementById('tbl-count');
     if (countEl) countEl.textContent = filteredDB.length + ' registros con Prioridad TI (de ' + DB.length + ' total)';
   } else {
-    if (estatus) { const sel = document.getElementById('f-estatus'); if (sel) sel.value = estatus; }
+    if (estatus) {
+      // Marcar solo ese estatus en las pastillas
+      _selectedEstatus = estatus ? [estatus] : [];
+      updatePills();
+    }
     if (tipo)    { const sel = document.getElementById('f-tipo');    if (sel) sel.value = tipo; }
     populateFilters();
     applyFilters();
@@ -1647,32 +1977,80 @@ function populateFilters() {
     const sel=document.getElementById(id);if(!sel)return; const sv=sel.value;
     sel.innerHTML=`<option value="">${ph}</option>`+uniqVals(key).map(v=>`<option${v===sv?' selected':''}>${v}</option>`).join('');
   });
-  // Estatus: siempre los 5 fijos del semáforo
-  const selE=document.getElementById('f-estatus');if(selE){const sv=selE.value;
-  const EDOTS={'Sin iniciar':'⚪','En pausa':'🟠','En tiempo':'🟢','En riesgo':'🟡','Con problema':'🔴','Finalizado':'✅'};
-  selE.innerHTML='<option value="">Todos los estatus</option>'+SEM.map(s=>`<option value="${s.label}"${s.label===sv?' selected':''}>${EDOTS[s.label]||''} ${s.label}</option>`).join('');}
+}
+
+// ── Dropdown multi-estatus ──────────────────────────────────────────────────
+// ── Filtro estatus tipo pastilla ──────────────────────────────────────────────
+const PILL_COLORS = {
+  'Sin iniciar': ['#f7f6f3','#bbb','#5f5e5a'],
+  'En pausa':    ['#fff3e0','#e65100','#7a4a09'],
+  'En tiempo':   ['#e4f2de','#2e7d32','#1b5e20'],
+  'En riesgo':   ['#fff8e1','#f9a825','#633806'],
+  'Con problema':['#fbeaea','#c62828','#a0342b'],
+  'Finalizado':  ['#e8f0fe','#1a5fb4','#0d3b78'],
+};
+let _selectedEstatus = []; // vacío = todos
+
+function clickEstPill(btn) {
+  const val = btn.dataset.val;
+  if (val === '') {
+    // "Todos" — limpiar selección
+    _selectedEstatus = [];
+  } else {
+    const idx = _selectedEstatus.indexOf(val);
+    if (idx > -1) _selectedEstatus.splice(idx, 1);
+    else _selectedEstatus.push(val);
+  }
+  updatePills();
+  applyFilters();
+}
+
+function updatePills() {
+  document.querySelectorAll('.est-pill').forEach(btn => {
+    const val = btn.dataset.val;
+    const isAll = val === '';
+    const isActive = isAll ? _selectedEstatus.length === 0 : _selectedEstatus.includes(val);
+    if (isAll) {
+      btn.style.background = isActive ? 'var(--blue-bg)' : '#f7f6f3';
+      btn.style.border     = isActive ? '1.5px solid var(--blue)' : '.5px solid #bbb';
+      btn.style.color      = isActive ? 'var(--blue-t)' : '#5f5e5a';
+      btn.style.fontWeight = isActive ? '700' : '500';
+    } else {
+      const c = PILL_COLORS[val] || ['#f7f6f3','#bbb','#5f5e5a'];
+      btn.style.background = isActive ? c[0] : '#f7f6f3';
+      btn.style.border     = isActive ? `1.5px solid ${c[1]}` : '.5px solid #bbb';
+      btn.style.color      = isActive ? c[2] : '#5f5e5a';
+      btn.style.fontWeight = isActive ? '700' : '500';
+    }
+  });
 }
 
 function clearFilters() {
-  document.getElementById('f-q').value='';
-  ['f-tipo','f-estatus','f-pm','f-resp','f-dev','f-area','f-fase'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  document.getElementById('f-q').value = '';
+  ['f-tipo','f-pm','f-resp','f-dev','f-area','f-fase','f-weeklyti'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  _selectedEstatus = [];
+  updatePills();
   applyFilters();
 }
 
 let filteredDB = [];
 function applyFilters() {
-  const q    = document.getElementById('f-q').value.toLowerCase();
-  const ft   = document.getElementById('f-tipo').value;
-  const fe   = document.getElementById('f-estatus').value;
-  const fp   = document.getElementById('f-pm').value;
-  const fresp= document.getElementById('f-resp')?.value||'';
-  const fdev = document.getElementById('f-dev')?.value||'';
-  const fa   = document.getElementById('f-area').value;
-  const ff   = document.getElementById('f-fase')?.value||'';
+  const q     = document.getElementById('f-q').value.toLowerCase();
+  const ft    = document.getElementById('f-tipo')?.value || '';
+  const fp    = document.getElementById('f-pm')?.value || '';
+  const fresp = document.getElementById('f-resp')?.value || '';
+  const fdev  = document.getElementById('f-dev')?.value || '';
+  const fa    = document.getElementById('f-area')?.value || '';
+  const ff    = document.getElementById('f-fase')?.value || '';
+  const fwti  = document.getElementById('f-weeklyti')?.value || '';
   filteredDB = DB.filter(d => {
     const eLabel = normEstatus(d._estatus);
-    const eOk = !fe || eLabel === fe;
-    return (!ft||d._tipo===ft)&&eOk&&(!fp||d._pm===fp)&&(!fresp||d._resp===fresp)&&(!fdev||d._dev===fdev)&&(!fa||d._area===fa)&&(!ff||d._fase===ff)&&
+    const eOk    = _selectedEstatus.length === 0 || _selectedEstatus.includes(eLabel);
+    const wtiOk  = !fwti || (d._weeklyTI||'') === fwti;
+    // Si filtro Weekly TI activo, excluir Finalizados automáticamente
+    const finOk  = !(fwti==='Si' && eLabel==='Finalizado');
+    return (!ft||d._tipo===ft)&&eOk&&wtiOk&&finOk&&(!fp||d._pm===fp)&&(!fresp||d._resp===fresp)&&
+           (!fdev||d._dev===fdev)&&(!fa||d._area===fa)&&(!ff||d._fase===ff)&&
            (!q||COLS.some(cx=>String(d[cx.k]||'').toLowerCase().includes(q)));
   });
   if (sortCol!==null) {
@@ -1680,34 +2058,48 @@ function applyFilters() {
     filteredDB.sort((a,b)=>String(a[k]||'').localeCompare(String(b[k]||''),undefined,{numeric:true})*sortDir);
   }
   renderTable();
-  // Actualizar gráficos en tiempo real si esa vista está activa
   if (document.getElementById('page-graficos')?.classList.contains('active')) renderCharts();
 }
 
 function sortBy(i) { sortCol===i?sortDir*=-1:(sortCol=i,sortDir=1); applyFilters(); }
 
 function renderTable() {
+  const visCols = COLS.filter(c=>c.vis!==false);
   document.getElementById('tbl-count').textContent = filteredDB.length+' de '+DB.length+' registros';
-  document.getElementById('tHead').innerHTML = '<tr>'+COLS.map((c,i)=>
-    `<th onclick="sortBy(${i})">${c.l} <span class="sa">${sortCol===i?(sortDir>0?'▲':'▼'):'↕'}</span></th>`).join('')+'<th>Acciones</th></tr>';
+  document.getElementById('tHead').innerHTML = '<tr>'+visCols.map((c,i)=>
+    `<th draggable="true" ondragstart="colDragStart(event)" ondragover="colDragOver(event)" ondrop="colDrop(event)" data-k="${c.k}" onclick="sortBy(${COLS.indexOf(c)})" style="cursor:pointer">${c.l} <span class="sa">${sortCol===COLS.indexOf(c)?(sortDir>0?'▲':'▼'):'↕'}</span></th>`).join('')+'<th>Obs</th><th>Acciones</th></tr>';
 
   if (!filteredDB.length) {
-    document.getElementById('tBody').innerHTML=`<tr><td colspan="${COLS.length+1}"><div class="empty-state"><div class="empty-icon">${DB.length?'🔍':'📋'}</div><div>${DB.length?'Sin resultados':'Carga un archivo para ver datos'}</div></div></td></tr>`;
+    document.getElementById('tBody').innerHTML=`<tr><td colspan="${visCols.length+2}"><div class="empty-state"><div class="empty-icon">${DB.length?'🔍':'📋'}</div><div>${DB.length?'Sin resultados':'Carga un archivo para ver datos'}</div></div></td></tr>`;
     return;
   }
+  loadCambios();
   document.getElementById('tBody').innerHTML = filteredDB.map(d => {
     const ri = DB.indexOf(d);
-    const cells = COLS.map(c => {
+    // Detectar si tuvo cambio de estatus reciente
+    const tuvoCambio = CAMBIOS.some(c=>c.nombre===d._nombre && c.campo==='_estatus');
+    const cells = visCols.map(c => {
       const v=d[c.k];
       if (c.k==='_tipo')      return `<td><span class="badge ${tipoBadge(v)}">${v||'—'}</span></td>`;
+      if (c.k==='_nombre')    return `<td style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v||''}">${tuvoCambio?'⚠️ ':''}<span title="${tuvoCambio?'Este proyecto tuvo cambios de estatus. Ver Control de Cambios.':''}">${v||'—'}</span></td>`;
       if (c.k==='_estatus')   return `<td>${semBadge(v)}</td>`;
       if (c.k==='_prioridad') return `<td><span class="badge ${prioBadge(v)}">${v||'—'}</span></td>`;
       if (c.k==='_avance')    return `<td><div style="display:flex;align-items:center;gap:8px;min-width:90px">
         <div style="flex:1;background:var(--border);border-radius:3px;height:5px"><div style="background:var(--blue);border-radius:3px;height:5px;width:${v||0}%"></div></div>
         <span style="font-size:11px;font-weight:700;color:var(--text2)">${v||0}%</span></div></td>`;
+      if (c.k==='_weeklyTI')  return `<td style="text-align:center">${v==='Si'?'⭐':'—'}</td>`;
+      if (c.k==='_retraso')   return `<td style="text-align:center">${v==='Si'?'<span style="color:#c0392b;font-weight:700">⚠️ Sí</span>':'<span style="color:#27ae60">✅ No</span>'}</td>`;
       return `<td title="${v||''}">${v||'—'}</td>`;
     }).join('');
-    return `<tr>${cells}<td><div class="td-actions">
+    // Ícono observaciones
+    const obsCount = (d._obsHistorico||[]).length + (d._obs&&d._obs!=='—'&&d._obs!==''?1:0);
+    const obsIcon = `<td style="text-align:center">
+      <button title="${obsCount?obsCount+' observación(es)':'Sin observaciones'}" onclick="openObsModal(${ri})"
+        style="background:none;border:none;cursor:pointer;font-size:15px;position:relative">
+        💬${obsCount?`<span style="position:absolute;top:-4px;right:-6px;background:#c0392b;color:#fff;border-radius:50%;font-size:9px;width:14px;height:14px;display:flex;align-items:center;justify-content:center;font-weight:700">${obsCount>9?'9+':obsCount}</span>`:''}
+      </button>
+    </td>`;
+    return `<tr>${cells}${obsIcon}<td><div class="td-actions">
       <button class="btn btn-ghost btn-sm" onclick="openModal(${ri})">✏️</button>
       <button class="btn btn-ghost btn-sm" style="color:#1a5fb4;border-color:#1a5fb4" onclick="exportSinglePptx(${ri})" title="Descargar slide PPT de esta iniciativa">📑</button>
       <button class="btn btn-danger btn-sm" onclick="openDel(${ri})">🗑️</button>
@@ -1761,8 +2153,13 @@ function saveRecord(){
   rec._avance=parseInt(rec._avance)||0;
   rec._estatus = normEstatus(rec._estatus);
   if(editIdx!==null){
+    const prevEstatus = DB[editIdx]._estatus;
     DB[editIdx]={...DB[editIdx],...rec};
     saveOverride(DB[editIdx]); // persiste edición encima de Drive
+    // Registrar cambio de estatus si cambió
+    if (prevEstatus !== rec._estatus && rec._estatus && rec._estatus !== '—') {
+      registrarCambio(DB[editIdx], '_estatus', prevEstatus, rec._estatus);
+    }
     toast('✅ Registro actualizado');
   } else {
     rec._source='manual';
@@ -4027,10 +4424,10 @@ async function _buildChartsPngFromData(data) {
 
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
-    ['ovData','ovDel','ovRiesgo','ovRDel','ovSync','ovExport'].forEach(id=>{const el=document.getElementById(id);if(el)el.classList.remove('open');});
+    ['ovData','ovDel','ovRiesgo','ovRDel','ovSync','ovExport','ovColConfig','ovObs'].forEach(id=>{const el=document.getElementById(id);if(el)el.classList.remove('open');});
   }
 });
-['ovData','ovDel','ovRiesgo','ovRDel','ovSync','ovExport'].forEach(id=>{
+['ovData','ovDel','ovRiesgo','ovRDel','ovSync','ovExport','ovColConfig','ovObs'].forEach(id=>{
   const el=document.getElementById(id);if(!el)return;
   el.addEventListener('click',e=>{if(e.target===e.currentTarget)e.target.classList.remove('open');});
 });
@@ -4042,6 +4439,214 @@ window.restoreUIFromData = restoreUIFromData;
 window.refreshAllViews   = refreshAllViews;
 window.toast             = toast;
 window.renderSnaps       = renderSnaps;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MEJORA 7 — COLUMNAS CONFIGURABLES (drag & drop)
+// ══════════════════════════════════════════════════════════════════════════════
+const COLS_DEFAULT = [
+  {k:'_tipo',      l:'Tipo',           vis:true},
+  {k:'_nombre',    l:'Nombre',         vis:true},
+  {k:'_estatus',   l:'Estatus',        vis:true},
+  {k:'_pm',        l:'PM',             vis:true},
+  {k:'_resp',      l:'Responsable TI', vis:true},
+  {k:'_area',      l:'Área',           vis:true},
+  {k:'_prioridad', l:'Prioridad',      vis:true},
+  {k:'_avance',    l:'Avance %',       vis:true},
+  {k:'_fase',      l:'Fase',           vis:true},
+  {k:'_dev',       l:'Desarrollador',  vis:true},
+  {k:'_weeklyTI',  l:'Weekly TI',      vis:false},
+  {k:'_retraso',   l:'Retraso',        vis:false},
+];
+
+function loadColConfig() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('pmo_cols')||'null');
+    if (stored && stored.length) return stored;
+  } catch(e) {}
+  return COLS_DEFAULT.map(c=>({...c}));
+}
+function saveColConfig() {
+  const items = document.querySelectorAll('#col-config-list .col-item');
+  const newCols = [...items].map(el => ({
+    k:   el.dataset.k,
+    l:   COLS_DEFAULT.find(c=>c.k===el.dataset.k)?.l || el.dataset.k,
+    vis: el.querySelector('input[type=checkbox]').checked,
+  }));
+  try { localStorage.setItem('pmo_cols', JSON.stringify(newCols)); } catch(e) {}
+  COLS.length=0; newCols.forEach(c=>COLS.push(c));
+  document.getElementById('ovColConfig').classList.remove('open');
+  renderTable();
+  toast('✅ Columnas guardadas');
+}
+function resetColConfig() {
+  try { localStorage.removeItem('pmo_cols'); } catch(e) {}
+  COLS.length=0; COLS_DEFAULT.forEach(c=>COLS.push({...c}));
+  document.getElementById('ovColConfig').classList.remove('open');
+  renderTable();
+  toast('↺ Columnas restablecidas');
+}
+function openColConfig() {
+  const list = document.getElementById('col-config-list');
+  list.innerHTML = COLS.map(c=>`
+    <div class="col-item" data-k="${c.k}" draggable="true"
+      style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--surface2);border:.5px solid var(--border);border-radius:var(--rs);cursor:grab;user-select:none"
+      ondragstart="colDragStart(event)" ondragover="colDragOver(event)" ondrop="colDrop(event)">
+      <span style="font-size:14px;color:var(--text3)">☰</span>
+      <span style="flex:1;font-size:13px;font-weight:600">${c.l}</span>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;color:var(--text3)">
+        <input type="checkbox" ${c.vis?'checked':''} style="cursor:pointer"> Visible
+      </label>
+    </div>`).join('');
+  document.getElementById('ovColConfig').classList.add('open');
+}
+let _dragColEl = null;
+function colDragStart(e) { _dragColEl=e.currentTarget; e.dataTransfer.effectAllowed='move'; }
+function colDragOver(e)  { e.preventDefault(); e.dataTransfer.dropEffect='move'; }
+function colDrop(e) {
+  e.preventDefault();
+  const target = e.currentTarget;
+  if (_dragColEl && target !== _dragColEl) {
+    const list = target.parentNode;
+    const items = [...list.children];
+    const fromI = items.indexOf(_dragColEl);
+    const toI   = items.indexOf(target);
+    if (fromI < toI) list.insertBefore(_dragColEl, target.nextSibling);
+    else             list.insertBefore(_dragColEl, target);
+  }
+}
+// Inicializar COLS desde localStorage
+(function initCols() {
+  const loaded = loadColConfig();
+  COLS.length = 0;
+  loaded.forEach(c => COLS.push(c));
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MEJORA 1 — OBSERVACIONES LUIS
+// ══════════════════════════════════════════════════════════════════════════════
+let _obsIdx = null;
+
+function openObsModal(dbIdx) {
+  _obsIdx = dbIdx;
+  const d = DB[dbIdx];
+  document.getElementById('obs-proyecto-name').textContent = d._nombre || '—';
+  renderObsHistorico(d);
+  document.getElementById('obs-nueva').value = '';
+  document.getElementById('ovObs').classList.add('open');
+}
+
+function renderObsHistorico(d) {
+  const hist = d._obsHistorico || [];
+  const obs  = d._obs && d._obs !== '—' && d._obs !== '' ? d._obs : '';
+  const container = document.getElementById('obs-historico');
+  if (!hist.length && !obs) {
+    container.innerHTML = `<div style="font-size:13px;color:var(--text3);padding:8px 0">Sin observaciones registradas aún.</div>`;
+    return;
+  }
+  const all = obs && !hist.find(h=>h.texto===obs)
+    ? [{texto:obs, fecha:'Cargado de Excel', usuario:'Excel', ts:''}]
+    : [];
+  const items = [...all, ...hist];
+  container.innerHTML = items.map((h,i)=>`
+    <div style="background:var(--surface2);border-radius:var(--rs);padding:10px 12px;border-left:3px solid var(--blue)">
+      <div style="font-size:12px;color:var(--text2)">${h.texto}</div>
+      <div style="font-size:10px;color:var(--text3);margin-top:4px;display:flex;justify-content:space-between">
+        <span>${h.usuario||'—'}</span>
+        <span>${h.fecha||''}</span>
+      </div>
+    </div>`).join('');
+}
+
+function addObservacion() {
+  const txt = document.getElementById('obs-nueva').value.trim();
+  if (!txt) { toast('Escribe una observación primero','error'); return; }
+  if (_obsIdx === null) return;
+  const d = DB[_obsIdx];
+  if (!d._obsHistorico) d._obsHistorico = [];
+  const now = new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  d._obsHistorico.push({
+    texto:   txt,
+    fecha:   now,
+    usuario: window._currentUser?.email?.split('@')[0] || 'Usuario',
+    ts:      new Date().toISOString(),
+  });
+  renderObsHistorico(d);
+  document.getElementById('obs-nueva').value = '';
+  saveToStorage();
+  broadcastChange();
+  toast('💬 Observación registrada');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MEJORA 2 — CONTROL DE CAMBIOS (registro automático de cambios de estatus)
+// ══════════════════════════════════════════════════════════════════════════════
+let CAMBIOS = [];
+
+function loadCambios() {
+  try { CAMBIOS = JSON.parse(localStorage.getItem('pmo_cambios')||'[]'); } catch(e) { CAMBIOS=[]; }
+}
+function saveCambios() {
+  try { localStorage.setItem('pmo_cambios', JSON.stringify(CAMBIOS.slice(0,300))); } catch(e) {}
+}
+
+function registrarCambio(rec, campo, valorAnterior, valorNuevo) {
+  loadCambios();
+  CAMBIOS.unshift({
+    ts:           new Date().toISOString(),
+    tipo:         rec._tipo   || '—',
+    nombre:       rec._nombre || '—',
+    campo,
+    valorAnterior: String(valorAnterior||'—'),
+    valorNuevo:    String(valorNuevo||'—'),
+    usuario:      window._currentUser?.email?.split('@')[0] || 'Usuario',
+  });
+  saveCambios();
+}
+
+// Hook saveRecord para capturar cambios
+const _origSaveRecord = window.saveRecord;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MEJORA 6 — NAVEGACIÓN DESDE GRÁFICOS
+// ══════════════════════════════════════════════════════════════════════════════
+function goToDataFiltered(estatus, tipo) {
+  if (estatus === '__sin_estatus__') {
+    _selectedEstatus = [];
+    updatePills();
+    populateFilters();
+    filteredDB = DB.filter(d => {
+      const tipoOk = !tipo || d._tipo === tipo;
+      return tipoOk && normEstatus(d._estatus) === '—';
+    });
+  } else if (estatus === '__prio_ti__') {
+    _selectedEstatus = [];
+    updatePills();
+    populateFilters();
+    filteredDB = DB.filter(d => {
+      const tipoOk = !tipo || d._tipo === tipo;
+      const v = String(d._prioTI||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+      return tipoOk && /^(si|yes|1|true|x)$/.test(v);
+    });
+  } else {
+    _selectedEstatus = estatus ? [estatus] : [];
+    updatePills();
+    if (tipo) { const selT=document.getElementById('f-tipo'); if(selT) selT.value=tipo; }
+    populateFilters();
+    filteredDB = DB.filter(d => {
+      const tipoOk  = !tipo || d._tipo === tipo;
+      const semOk   = !estatus || normEstatus(d._estatus) === estatus;
+      return tipoOk && semOk;
+    });
+  }
+  renderTable();
+  // Navegar a Data
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-data').classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
+  const cnt = document.getElementById('tbl-count');
+  if(cnt) cnt.textContent = filteredDB.length+' de '+DB.length+' registros';
+}
 </script>
 </body>
 </html>
