@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v10.0 - obs Luis + control cambios + weeklyTI + retraso + cols drag + nav graficos - 2026-06-04 -->
+<!-- v10.1 - fix obs preserve + control cambios modulo + chart click nav + sticky table - 2026-06-04 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -379,7 +379,11 @@ main{overflow:auto}
 .table-card{background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
 .table-top{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:.5px solid var(--border)}
 .table-count{font-size:13px;color:var(--text2);font-weight:600}
-.table-wrap{overflow-x:auto}
+.table-wrap{overflow-x:auto;max-height:calc(100vh - 280px);overflow-y:auto;position:relative}
+.table-wrap thead th{position:sticky;top:0;z-index:2;background:var(--surface2)}
+.table-wrap::-webkit-scrollbar{height:6px;width:6px}
+.table-wrap::-webkit-scrollbar-track{background:var(--surface2)}
+.table-wrap::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
 table{width:100%;border-collapse:collapse}
 th{text-align:left;padding:10px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);background:var(--surface2);border-bottom:.5px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none}
 th:hover{color:var(--text)}
@@ -405,7 +409,8 @@ tr:hover td{background:var(--bg)}
 .chart-card{background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:1.25rem;box-shadow:var(--shadow)}
 .chart-card.full{grid-column:1/-1}
 .chart-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);margin-bottom:6px;display:flex;align-items:center;justify-content:space-between}
-.chart-total{font-size:13px;font-weight:900;color:var(--blue);text-transform:none;letter-spacing:0}
+.chart-total{font-size:13px;font-weight:900;color:var(--blue);text-transform:none;letter-spacing:0;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.chart-total:hover{opacity:.75}
 .chart-wrap{position:relative;width:100%}
 .legend-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
 .leg-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)}
@@ -575,6 +580,7 @@ tr:hover td{background:var(--bg)}
     <button class="nav-btn" onclick="goPage('graficos',this)"><span class="nav-icon">📊</span>Gráficos</button>
     <button class="nav-btn" onclick="goPage('riesgos',this)"><span class="nav-icon">⚠️</span>Inventario Riesgos</button>
     <button class="nav-btn" onclick="goPage('historico',this)"><span class="nav-icon">🕐</span>Histórico</button>
+    <button class="nav-btn" onclick="goPage('cambios',this)"><span class="nav-icon">🔄</span>Control Cambios</button>
     <button class="nav-btn" id="nav-usuarios" onclick="goPage('usuarios',this);window.loadUsersList()" style="display:none"><span class="nav-icon">👥</span>Usuarios</button>
     <button class="nav-btn" onclick="doLogout()" style="margin-top:4px;color:var(--red);border-color:var(--red-bg)"><span class="nav-icon">🚪</span>Cerrar sesión</button>
   </nav>
@@ -744,10 +750,10 @@ tr:hover td{background:var(--bg)}
       <span id="g-count" style="font-size:12px;color:var(--text2);font-weight:600;margin-left:4px"></span>
     </div>
     <div class="charts-grid">
-      <div class="chart-card"><div class="chart-title">Por tipo <span class="chart-total" id="ct-tipo">—</span></div><div class="legend-row" id="leg-tipo"></div><div class="chart-wrap" style="height:200px"><canvas id="ch-tipo"></canvas></div></div>
-      <div class="chart-card"><div class="chart-title">Por estatus <span class="chart-total" id="ct-est">—</span></div><div class="legend-row" id="leg-est"></div><div class="chart-wrap" style="height:200px"><canvas id="ch-est"></canvas></div></div>
-      <div class="chart-card full"><div class="chart-title">Por área <span class="chart-total" id="ct-area">—</span></div><div class="chart-wrap" style="height:230px"><canvas id="ch-area"></canvas></div></div>
-      <div class="chart-card full"><div class="chart-title">Por PM <span class="chart-total" id="ct-pm">—</span></div><div class="chart-wrap" style="height:230px"><canvas id="ch-pm"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">Por tipo <span class="chart-total" id="ct-tipo" onclick="goToDataFiltered('','')" title="Ver todos en Data">—</span></div><div class="legend-row" id="leg-tipo"></div><div class="chart-wrap" style="height:200px"><canvas id="ch-tipo"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">Por estatus <span class="chart-total" id="ct-est" onclick="goToDataFiltered('','')" title="Ver todos en Data">—</span></div><div class="legend-row" id="leg-est"></div><div class="chart-wrap" style="height:200px"><canvas id="ch-est"></canvas></div></div>
+      <div class="chart-card full"><div class="chart-title">Por área <span class="chart-total" id="ct-area" onclick="goToDataFiltered('','')" title="Ver todos en Data">—</span></div><div class="chart-wrap" style="height:230px"><canvas id="ch-area"></canvas></div></div>
+      <div class="chart-card full"><div class="chart-title">Por PM <span class="chart-total" id="ct-pm" onclick="goToDataFiltered('','')" title="Ver todos en Data">—</span></div><div class="chart-wrap" style="height:230px"><canvas id="ch-pm"></canvas></div></div>
       <div class="chart-card full">
         <div class="chart-title">PM · Proyectos activos por estatus
           <span style="font-size:10px;font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0">(excluye En pausa y Sin iniciar)</span>
@@ -871,6 +877,49 @@ tr:hover td{background:var(--bg)}
           <div style="color:var(--text2)">Solo lectura · No exporta · No sincroniza · Ideal para consulta</div>
         </div>
       </div>
+    </div>
+  </div>
+  <!-- ══ CONTROL DE CAMBIOS ══════════════════════════════════════════════════ -->
+  <div class="page" id="page-cambios">
+    <div class="page-header">
+      <div><div class="page-title">Control de Cambios</div><div class="page-sub">Historial de modificaciones de estatus en proyectos e iniciativas</div></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" onclick="clearAllCambios()" style="color:var(--red)">🗑️ Limpiar historial</button>
+        <button class="btn btn-ghost" onclick="exportCambiosHTML()" style="border-color:var(--blue-t);color:var(--blue-t);font-weight:700">📄 Exportar</button>
+      </div>
+    </div>
+    <style>
+    .chg-filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1.25rem;background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:12px 14px;box-shadow:var(--shadow)}
+    .chg-filters select,.chg-filters input{font-size:13px;padding:6px 10px;border:.5px solid var(--border2);border-radius:var(--rs);background:var(--surface);height:34px;color:var(--text)}
+    .chg-timeline{display:flex;flex-direction:column;gap:0}
+    .chg-item{display:flex;gap:14px;padding:0 0 14px 0}
+    .chg-line{display:flex;flex-direction:column;align-items:center;flex-shrink:0;width:32px}
+    .chg-dot{width:11px;height:11px;border-radius:50%;flex-shrink:0;margin-top:4px}
+    .chg-vline{flex:1;width:2px;background:var(--border2);margin-top:3px;min-height:20px}
+    .chg-card{background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:12px 16px;flex:1;box-shadow:var(--shadow)}
+    .chg-proyecto{font-size:13px;font-weight:700;color:var(--text)}
+    .chg-meta{font-size:11px;color:var(--text3);margin-top:2px}
+    .chg-old{background:#fbeaea;color:#791f1f;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600}
+    .chg-new{background:#e4f2de;color:#1b5e20;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:700}
+    .chg-arrow{color:var(--text3)}
+    </style>
+    <div class="chg-filters">
+      <input type="text" id="chg-q" placeholder="🔍 Buscar proyecto..." oninput="renderCambiosPage()">
+      <select id="chg-f-tipo" onchange="renderCambiosPage()">
+        <option value="">Todos los tipos</option>
+        <option value="Proyecto">Proyecto</option>
+        <option value="Requerimiento">Requerimiento</option>
+      </select>
+      <button class="btn btn-ghost" onclick="document.getElementById('chg-q').value='';document.getElementById('chg-f-tipo').value='';renderCambiosPage()" style="height:34px">✕ Limpiar</button>
+      <span id="chg-count" style="font-size:12px;color:var(--text3);font-weight:600;margin-left:4px"></span>
+    </div>
+    <div id="cambios-content">
+      <div id="cambios-empty" style="background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:3rem;text-align:center;box-shadow:var(--shadow)">
+        <div style="font-size:40px;margin-bottom:12px">🔄</div>
+        <div style="font-size:15px;font-weight:700;margin-bottom:8px">Control de Cambios</div>
+        <div style="font-size:13px;color:var(--text3)">Los cambios de estatus se registran automáticamente cuando editas un registro en el módulo Data.<br>Edita el estatus de algún proyecto para ver el historial aquí.</div>
+      </div>
+      <div id="cambios-list" class="chg-timeline" style="display:none"></div>
     </div>
   </div>
 
@@ -1132,6 +1181,7 @@ function goPage(name, btn) {
   if (name === 'graficos' && DB.length)  renderCharts();
   if (name === 'riesgos')                { populateRFilters(); applyRFilters(); }
   if (name === 'historico')              renderSnaps();
+  if (name === 'cambios')                renderCambiosPage();
   if (name === 'usuarios')              { if(typeof window.loadUsersList==='function') window.loadUsersList(); }
 }
 
@@ -1450,9 +1500,22 @@ async function loadExcel(buffer, filename) {
       }
       // _obs: mantener como texto libre (puede ser multilínea)
       if (!rec._obs || rec._obs === '—') rec._obs = '';
-      // Histórico de observaciones: si ya existe en DB, preservar
+      // Histórico de observaciones: SIEMPRE preservar el historial manual previo
       const existing = DB.find(e => e._nombre === (rec._nombre||''));
-      if (existing && existing._obsHistorico) rec._obsHistorico = existing._obsHistorico;
+      if (existing) {
+        if (existing._obsHistorico) rec._obsHistorico = existing._obsHistorico;
+        // Si el Excel tiene una obs nueva que no está ya en el historial, agregarla
+        if (rec._obs && rec._obs !== '' && existing._obsHistorico) {
+          const yaExiste = existing._obsHistorico.some(h => h.texto === rec._obs);
+          if (!yaExiste) {
+            if (!rec._obsHistorico) rec._obsHistorico = [...(existing._obsHistorico||[])];
+            rec._obsHistorico.push({
+              texto: rec._obs, fecha: 'Excel · '+new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'}),
+              usuario: 'Excel', ts: new Date().toISOString(),
+            });
+          }
+        }
+      }
       // Normalizar tipo a los 3 valores válidos
       rec._tipo = normTipo(rec._tipo);
       // Normalizar estatus al semáforo exacto
@@ -2278,12 +2341,14 @@ function destroyChart(id){if(charts[id]){charts[id].destroy();delete charts[id];
 function buildDona(cid,lid,tid,data){
   const labels=data.map(e=>e[0]),vals=data.map(e=>e[1]),tot=vals.reduce((s,v)=>s+v,0);
   const cols=labels.map((_,i)=>PAL[i%PAL.length]);
-  if(lid)document.getElementById(lid).innerHTML=labels.map((l,i)=>`<span class="leg-item"><span class="leg-dot" style="background:${cols[i]}"></span>${l} (${vals[i]})</span>`).join('');
+  if(lid)document.getElementById(lid).innerHTML=labels.map((l,i)=>`<span class="leg-item" style="cursor:pointer" onclick="goToDataFiltered('${l}','')" title="Ver en Data"><span class="leg-dot" style="background:${cols[i]}"></span>${l} (${vals[i]})</span>`).join('');
   if(tid)document.getElementById(tid).textContent='Total: '+tot;
   destroyChart(cid);
   charts[cid]=new Chart(document.getElementById(cid),{type:'doughnut',
     data:{labels,datasets:[{data:vals,backgroundColor:cols,borderWidth:2,borderColor:'#fff'}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},
+    options:{responsive:true,maintainAspectRatio:false,
+      onClick:(evt,el)=>{ if(el.length){const lbl=labels[el[0].index]; goToDataFiltered(lbl,''); } },
+      plugins:{legend:{display:false},
       tooltip:{callbacks:{label:c=>`${c.label}: ${c.parsed} (${Math.round(c.parsed/tot*100)}%)`}}}}});
 }
 function buildBar(cid,tid,data){
@@ -2292,7 +2357,9 @@ function buildBar(cid,tid,data){
   destroyChart(cid);
   charts[cid]=new Chart(document.getElementById(cid),{type:'bar',
     data:{labels,datasets:[{data:vals,backgroundColor:labels.map((_,i)=>PAL[i%PAL.length]),borderRadius:5}]},
-    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      onClick:(evt,el)=>{ if(el.length){const lbl=labels[el[0].index]; goToDataFiltered('',lbl); } },
+      plugins:{legend:{display:false},
       tooltip:{callbacks:{label:c=>`${c.parsed.x} (${Math.round(c.parsed.x/tot*100)}%)`}}},
       scales:{x:{ticks:{font:{size:11}}},y:{ticks:{font:{size:11}}}}}});
 }
@@ -4607,8 +4674,114 @@ function registrarCambio(rec, campo, valorAnterior, valorNuevo) {
 const _origSaveRecord = window.saveRecord;
 
 // ══════════════════════════════════════════════════════════════════════════════
-// MEJORA 6 — NAVEGACIÓN DESDE GRÁFICOS
+// CONTROL DE CAMBIOS — página visual
 // ══════════════════════════════════════════════════════════════════════════════
+function renderCambiosPage() {
+  loadCambios();
+  const q     = (document.getElementById('chg-q')?.value||'').toLowerCase();
+  const fTipo = document.getElementById('chg-f-tipo')?.value||'';
+  const filtered = CAMBIOS.filter(c=>
+    (!q     || c.nombre.toLowerCase().includes(q)) &&
+    (!fTipo || c.tipo===fTipo)
+  );
+  const cnt = document.getElementById('chg-count');
+  if(cnt) cnt.textContent = `${filtered.length} cambio${filtered.length!==1?'s':''}`;
+  const empty = document.getElementById('cambios-empty');
+  const list  = document.getElementById('cambios-list');
+  if(!filtered.length){
+    empty.style.display=''; list.style.display='none';
+    if(CAMBIOS.length && (q||fTipo)) empty.innerHTML=`<div style="font-size:40px;margin-bottom:12px">🔍</div><div style="font-size:14px;font-weight:700">Sin resultados</div>`;
+    return;
+  }
+  empty.style.display='none'; list.style.display='flex';
+  const SEM_DOT={'En tiempo':'#4caf50','En riesgo':'#ffc107','Con problema':'#f44336','Sin iniciar':'#9e9e9e','En pausa':'#ff9800','Finalizado':'#607d8b'};
+  list.innerHTML = filtered.map((c,i)=>{
+    const dt   = new Date(c.ts);
+    const fecha= dt.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'});
+    const hora = dt.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+    const dot  = SEM_DOT[c.valorNuevo]||'var(--blue)';
+    const isLast = i===filtered.length-1;
+    const tipoBg = c.tipo==='Proyecto'?'background:#deeaf8;color:#0d3b78':'background:#eceafe;color:#4a3899';
+    return `<div class="chg-item">
+      <div class="chg-line">
+        <span class="chg-dot" style="background:${dot};box-shadow:0 0 0 3px ${dot}33"></span>
+        ${!isLast?'<div class="chg-vline"></div>':''}
+      </div>
+      <div class="chg-card">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px">
+          <div>
+            <div class="chg-proyecto">${c.nombre}</div>
+            <div class="chg-meta">
+              ${c.tipo?`<span style="padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;${tipoBg}">${c.tipo}</span> · `:''}
+              <span style="font-weight:600">${c.usuario}</span> · ${fecha} a las ${hora}
+            </div>
+          </div>
+          <button onclick="goToDataFromCambio('${c.nombre.replace(/'/g,"\\'")}');" title="Ver en Data"
+            style="background:none;border:.5px solid var(--blue);color:var(--blue-t);border-radius:var(--rs);padding:3px 8px;font-size:11px;cursor:pointer;font-weight:700;white-space:nowrap;flex-shrink:0">→ Data</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-size:11px;font-weight:600;color:var(--text3)">Estatus:</span>
+          <span class="chg-old">${c.valorAnterior}</span>
+          <span class="chg-arrow">→</span>
+          <span class="chg-new">${c.valorNuevo}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function goToDataFromCambio(nombre) {
+  document.getElementById('f-q').value = nombre;
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-data').classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
+  populateFilters(); applyFilters();
+}
+
+function clearAllCambios() {
+  if(!confirm('¿Eliminar todo el historial de cambios?')) return;
+  CAMBIOS=[];
+  try{localStorage.removeItem('pmo_cambios');}catch(e){}
+  renderCambiosPage();
+  toast('🗑️ Historial limpiado');
+}
+
+function exportCambiosHTML() {
+  loadCambios();
+  if(!CAMBIOS.length){toast('Sin cambios registrados','error');return;}
+  const now=new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Control Cambios · PMO</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,'Segoe UI',sans-serif;color:#181816;background:#f5f4f1}
+.body{max-width:900px;margin:0 auto;padding:2rem}
+table{width:100%;border-collapse:collapse}th{padding:9px 12px;font-size:10px;font-weight:700;text-transform:uppercase;color:#888;background:#f0ede8;border-bottom:.5px solid #ddd;text-align:left}
+td{padding:9px 12px;border-bottom:.5px solid #eee;font-size:12px}tr:nth-child(even) td{background:#fafaf9}
+.old{background:#fbeaea;color:#791f1f;padding:2px 7px;border-radius:4px;text-decoration:line-through}
+.new{background:#e4f2de;color:#1b5e20;padding:2px 7px;border-radius:4px;font-weight:700}
+@media print{body{background:#fff}@page{margin:1.5cm}}</style></head><body><div class="body">
+<div style="background:linear-gradient(135deg,#0d3b78,#1a5fb4);color:#fff;border-radius:12px;padding:1.5rem 2rem;margin-bottom:1.5rem">
+  <div style="font-size:20px;font-weight:900;margin-bottom:4px">🔄 Control de Cambios · PMO TI</div>
+  <div style="font-size:12px;opacity:.8">Generado el ${now} · ${CAMBIOS.length} cambios</div>
+</div>
+<div style="background:#fff;border-radius:10px;border:.5px solid #ddd;overflow:hidden">
+<table><thead><tr><th>Fecha</th><th>Proyecto</th><th>Tipo</th><th>Estatus anterior</th><th>Estatus nuevo</th><th>Usuario</th></tr></thead>
+<tbody>${CAMBIOS.map(c=>{
+  const dt=new Date(c.ts);
+  const f=dt.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'})+' '+dt.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+  const tb=c.tipo==='Proyecto'?'background:#deeaf8;color:#0d3b78':'background:#eceafe;color:#4a3899';
+  return`<tr><td style="color:#888;white-space:nowrap">${f}</td><td style="font-weight:600">${c.nombre}</td>
+  <td><span style="padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;${tb}">${c.tipo||'—'}</span></td>
+  <td><span class="old">${c.valorAnterior}</span></td>
+  <td><span class="new">${c.valorNuevo}</span></td>
+  <td style="color:#888">${c.usuario}</td></tr>`;
+}).join('')}</tbody></table></div>
+<div style="text-align:center;padding:1rem;font-size:11px;color:#888;margin-top:1rem">PMO TI · ${now}</div>
+</div></body></html>`;
+  const blob=new Blob([html],{type:'text/html'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download=`Control-Cambios-${new Date().toISOString().slice(0,10)}.html`;a.click();
+  toast('📄 Exportado');
+}
 function goToDataFiltered(estatus, tipo) {
   if (estatus === '__sin_estatus__') {
     _selectedEstatus = [];
