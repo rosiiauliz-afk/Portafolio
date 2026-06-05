@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v10.2 - obs preserve fix + cambios desde excel + pm activos clickeable - 2026-06-04 -->
+<!-- v10.3 - obs store independiente + desviacion dot + filtro cambios - 2026-06-04 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -221,6 +221,7 @@ function startDataSync() {
     window.DB.forEach(d => { d._estatus = window.normEstatus(d._estatus); });
     window.deduplicateRDB();
     if (window.DB.length || window.SNAPS.length) {
+      if (typeof syncObsToDb === 'function') syncObsToDb();
       window.restoreUIFromData();
       window.refreshAllViews();
       if (typeof window.renderSnaps === 'function') window.renderSnaps();
@@ -710,6 +711,10 @@ tr:hover td{background:var(--bg)}
         <button class="est-pill" data-val="Finalizado" onclick="clickEstPill(this)"
           style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
           ✅ Finalizado
+        </button>
+        <button class="est-pill" data-val="__cambios__" onclick="clickEstPill(this)"
+          style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
+          ⚠️ Con cambios
         </button>
       </div>
       <select id="f-pm"   onchange="applyFilters()"><option value="">Todos los PM</option></select>
@@ -1386,7 +1391,7 @@ const EXCEL_MAP = {
   _pm:         ['pm','p.m.','project manager','gestor','lider proyecto','líder proyecto','lider de proyecto','líder de proyecto','gerente proyecto','gerente de proyecto','responsable proyecto','responsable del proyecto','pm asignado','pm del proyecto'],
   _obs:        ['observaciones luis','observaciones','observacion','observación','comentarios','comentarios luis','notas','obs luis','luis'],
   _weeklyTI:   ['visible weekly ti','weekly ti','visible weekly','weekly','visible ti','visibilidad ti','dev ti'],
-  _retraso:    ['retraso','con retraso','retraso final','tuvo retraso','delayed','delay'],
+  _desviacion: ['desviacion','desviación','desvio','desvío','tuvo desviacion','con desviacion','deviation'],
   _tl:         ['tl','t.l.','tech lead','technical lead','lider tecnico','líder técnico','lider técnico','líder tecnico','lider tech','líder tech','responsable técnico','responsable tecnico','lead técnico','lead tecnico','tl asignado'],
   _resp:       ['responsable ti','responsable de ti','owner ti','lider ti','líder ti'],
   _dev:        ['desarrollador','desarrolladores','developer','dev','programador','ingeniero de software','asignado a','asignado','recurso asignado','recurso'],
@@ -1496,35 +1501,31 @@ async function loadExcel(buffer, filename) {
         const w = rec._weeklyTI.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
         rec._weeklyTI = /^(s|si|yes|1|true|x)$/.test(w) ? 'Si' : 'No';
       }
-      // Normalizar _retraso → 'Si' o 'No'
-      if (rec._retraso && rec._retraso !== '—') {
-        const r = rec._retraso.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-        rec._retraso = /^(s|si|yes|1|true|x)$/.test(r) ? 'Si' : 'No';
+      // Normalizar _desviacion → 'Si' o 'No' (solo aplica a Finalizados)
+      if (rec._desviacion && rec._desviacion !== '—') {
+        const r = rec._desviacion.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+        rec._desviacion = /^(s|si|yes|1|true|x)$/.test(r) ? 'Si' : 'No';
       }
-      // _obs: mantener como texto libre (puede ser multilínea)
+      // _obs: mantener como texto libre
       if (!rec._obs || rec._obs === '—') rec._obs = '';
 
-      // Buscar registro previo en DB_PREV (antes del reload) — aquí sí existe
-      const prevRec = DB_PREV.find(e => (e._nombre||'').trim() === (rec._nombre||'').trim());
+      // ── HISTÓRICO OBSERVACIONES: usar store independiente ─────────────────
+      // 1. Siempre cargar historial del store local (nunca se pierde)
+      rec._obsHistorico = getObsForProject(rec._nombre || '');
 
-      // ── HISTÓRICO OBSERVACIONES: nunca borrar, siempre acumular ────────────
-      // 1. Restaurar historial previo siempre
-      if (prevRec && prevRec._obsHistorico) {
-        rec._obsHistorico = [...prevRec._obsHistorico];
-      } else {
-        rec._obsHistorico = [];
-      }
-      // 2. Si Excel trae obs nueva (diferente a las ya guardadas), agregarla al historial
+      // 2. Si el Excel trae obs nueva, agregarla al store y al registro
       if (rec._obs && rec._obs.trim() !== '') {
         const obsNorm = rec._obs.trim();
         const yaExiste = rec._obsHistorico.some(h => h.texto.trim() === obsNorm);
         if (!yaExiste) {
-          rec._obsHistorico.push({
+          const newObs = {
             texto:   obsNorm,
             fecha:   'Excel · ' + new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),
             usuario: 'Excel',
             ts:      new Date().toISOString(),
-          });
+          };
+          addObsToStore(rec._nombre || '', newObs);
+          rec._obsHistorico = getObsForProject(rec._nombre || '');
         }
       }
 
@@ -2052,10 +2053,16 @@ function semDot(v) {
   if (!m) return `<span class="sem-dot" style="background:#e0e0e0;border:1.5px solid #bdbdbd" title="${v||'—'}"></span>`;
   return `<span class="sem-dot" style="background:${m.hex};border:1.5px solid ${m.bdr}" title="${m.label}"></span>`;
 }
-function semBadge(v) {
+function semBadge(v, d) {
   const m = semGet(v);
   if (!m) return `<span class="badge b-gray">${v||'—'}</span>`;
-  return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:5px;font-size:11px;font-weight:700;white-space:nowrap;background:${m.bg};color:${m.color};border:1.5px solid ${m.bdr}"><span style="width:10px;height:10px;border-radius:50%;background:${m.hex};border:1.5px solid ${m.bdr};flex-shrink:0"></span>${m.label}</span>`;
+  // Para Finalizados: mostrar punto de desviación si aplica
+  let desviDot = '';
+  if (m.label === 'Finalizado' && d && d._desviacion) {
+    const esSi = d._desviacion === 'Si';
+    desviDot = `<span title="Desviación: ${esSi?'Sí':'No'}" style="width:9px;height:9px;border-radius:50%;background:${esSi?'#c0392b':'#27ae60'};border:1.5px solid ${esSi?'#922b21':'#1e8449'};flex-shrink:0;margin-left:2px"></span>`;
+  }
+  return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:5px;font-size:11px;font-weight:700;white-space:nowrap;background:${m.bg};color:${m.color};border:1.5px solid ${m.bdr}"><span style="width:10px;height:10px;border-radius:50%;background:${m.hex};border:1.5px solid ${m.bdr};flex-shrink:0"></span>${m.label}${desviDot}</span>`;
 }
 function estatBadge(v) { return semGet(v) ? 'b-sem-ok' : 'b-gray'; }
 function prioBadge(v)   { const s=(v||'').toLowerCase(); return /alta|high|crítica|critica|urgent|1/.test(s)?'b-red':/media|medium|normal|2/.test(s)?'b-amber':/baja|low|3/.test(s)?'b-green':'b-gray'; }
@@ -2081,6 +2088,7 @@ const PILL_COLORS = {
   'En riesgo':   ['#fff8e1','#f9a825','#633806'],
   'Con problema':['#fbeaea','#c62828','#a0342b'],
   'Finalizado':  ['#e8f0fe','#1a5fb4','#0d3b78'],
+  '__cambios__': ['#fff8e1','#f9a825','#e65100'],
 };
 let _selectedEstatus = []; // vacío = todos
 
@@ -2102,11 +2110,16 @@ function updatePills() {
   document.querySelectorAll('.est-pill').forEach(btn => {
     const val = btn.dataset.val;
     const isAll = val === '';
-    const isActive = isAll ? _selectedEstatus.length === 0 : _selectedEstatus.includes(val);
+    const isActive = isAll ? (_selectedEstatus.length === 0) : _selectedEstatus.includes(val);
     if (isAll) {
       btn.style.background = isActive ? 'var(--blue-bg)' : '#f7f6f3';
       btn.style.border     = isActive ? '1.5px solid var(--blue)' : '.5px solid #bbb';
       btn.style.color      = isActive ? 'var(--blue-t)' : '#5f5e5a';
+      btn.style.fontWeight = isActive ? '700' : '500';
+    } else if (val === '__cambios__') {
+      btn.style.background = isActive ? '#fff8e1' : '#f7f6f3';
+      btn.style.border     = isActive ? '1.5px solid #f9a825' : '.5px solid #bbb';
+      btn.style.color      = isActive ? '#e65100' : '#5f5e5a';
       btn.style.fontWeight = isActive ? '700' : '500';
     } else {
       const c = PILL_COLORS[val] || ['#f7f6f3','#bbb','#5f5e5a'];
@@ -2136,13 +2149,17 @@ function applyFilters() {
   const fa    = document.getElementById('f-area')?.value || '';
   const ff    = document.getElementById('f-fase')?.value || '';
   const fwti  = document.getElementById('f-weeklyti')?.value || '';
+  const filtroCambios = _selectedEstatus.includes('__cambios__');
+  const estatusFiltro = _selectedEstatus.filter(e => e !== '__cambios__');
+  loadCambios();
+  const nombresConCambios = new Set(CAMBIOS.map(c=>c.nombre));
   filteredDB = DB.filter(d => {
     const eLabel = normEstatus(d._estatus);
-    const eOk    = _selectedEstatus.length === 0 || _selectedEstatus.includes(eLabel);
+    const eOk    = estatusFiltro.length === 0 || estatusFiltro.includes(eLabel);
     const wtiOk  = !fwti || (d._weeklyTI||'') === fwti;
-    // Si filtro Weekly TI activo, excluir Finalizados automáticamente
     const finOk  = !(fwti==='Si' && eLabel==='Finalizado');
-    return (!ft||d._tipo===ft)&&eOk&&wtiOk&&finOk&&(!fp||d._pm===fp)&&(!fresp||d._resp===fresp)&&
+    const cambioOk = !filtroCambios || nombresConCambios.has(d._nombre);
+    return (!ft||d._tipo===ft)&&eOk&&wtiOk&&finOk&&cambioOk&&(!fp||d._pm===fp)&&(!fresp||d._resp===fresp)&&
            (!fdev||d._dev===fdev)&&(!fa||d._area===fa)&&(!ff||d._fase===ff)&&
            (!q||COLS.some(cx=>String(d[cx.k]||'').toLowerCase().includes(q)));
   });
@@ -2175,7 +2192,7 @@ function renderTable() {
       const v=d[c.k];
       if (c.k==='_tipo')      return `<td><span class="badge ${tipoBadge(v)}">${v||'—'}</span></td>`;
       if (c.k==='_nombre')    return `<td style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v||''}">${tuvoCambio?'⚠️ ':''}<span title="${tuvoCambio?'Este proyecto tuvo cambios de estatus. Ver Control de Cambios.':''}">${v||'—'}</span></td>`;
-      if (c.k==='_estatus')   return `<td>${semBadge(v)}</td>`;
+      if (c.k==='_estatus')   return `<td>${semBadge(v, d)}</td>`;
       if (c.k==='_prioridad') return `<td><span class="badge ${prioBadge(v)}">${v||'—'}</span></td>`;
       if (c.k==='_avance')    return `<td><div style="display:flex;align-items:center;gap:8px;min-width:90px">
         <div style="flex:1;background:var(--border);border-radius:3px;height:5px"><div style="background:var(--blue);border-radius:3px;height:5px;width:${v||0}%"></div></div>
@@ -3414,6 +3431,7 @@ function importSession() {
 // ── Restaurar UI a partir de datos en memoria ────────────────────────────────
 function restoreUIFromData() {
   if (!DB.length && !SNAPS.length) return;
+  syncObsToDb(); // siempre restaurar obs desde store local antes de renderizar
   if (DB.length) {
     document.getElementById('landing').style.display='none';
     document.getElementById('dashboard').style.display='block';
@@ -4546,12 +4564,40 @@ document.addEventListener('keydown',e=>{
 });
 
 // ── Exponer funciones necesarias para el módulo Firebase ───────────────────
-window.normEstatus       = normEstatus;
-window.deduplicateRDB    = deduplicateRDB;
-window.restoreUIFromData = restoreUIFromData;
-window.refreshAllViews   = refreshAllViews;
-window.toast             = toast;
-window.renderSnaps       = renderSnaps;
+// ══════════════════════════════════════════════════════════════════════════════
+// HISTORIAL DE OBSERVACIONES — almacenamiento independiente del DB
+// Clave: nombre del proyecto → array de observaciones
+// Esto garantiza que nunca se pierde sin importar recargas de Firebase o Excel
+// ══════════════════════════════════════════════════════════════════════════════
+const OBS_KEY = 'pmo_obs_hist';
+
+function getObsStore() {
+  try { return JSON.parse(localStorage.getItem(OBS_KEY) || '{}'); } catch(e) { return {}; }
+}
+function saveObsStore(store) {
+  try { localStorage.setItem(OBS_KEY, JSON.stringify(store)); } catch(e) {}
+}
+function getObsForProject(nombre) {
+  return getObsStore()[nombre] || [];
+}
+function addObsToStore(nombre, obs) {
+  const store = getObsStore();
+  if (!store[nombre]) store[nombre] = [];
+  // No duplicados
+  if (!store[nombre].some(h => h.texto.trim() === obs.texto.trim())) {
+    store[nombre].push(obs);
+    saveObsStore(store);
+  }
+}
+// Sincronizar obs del store al DB (llamar después de cargar datos)
+function syncObsToDb() {
+  const store = getObsStore();
+  DB.forEach(d => {
+    if (!d._nombre || d._nombre === '—') return;
+    const hist = store[d._nombre] || [];
+    d._obsHistorico = hist;
+  });
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // MEJORA 7 — COLUMNAS CONFIGURABLES (drag & drop)
@@ -4568,7 +4614,7 @@ const COLS_DEFAULT = [
   {k:'_fase',      l:'Fase',           vis:true},
   {k:'_dev',       l:'Desarrollador',  vis:true},
   {k:'_weeklyTI',  l:'Weekly TI',      vis:false},
-  {k:'_retraso',   l:'Retraso',        vis:false},
+  {k:'_desviacion',l:'Desviación',      vis:false},
 ];
 
 function loadColConfig() {
@@ -4675,25 +4721,27 @@ function addObservacion() {
   if (!txt) { toast('Escribe una observación primero','error'); return; }
   if (_obsIdx === null) return;
   const d = DB[_obsIdx];
-  // Inicializar historial si no existe — nunca sobreescribir
-  if (!Array.isArray(d._obsHistorico)) d._obsHistorico = [];
-  // Verificar que no sea duplicado
-  if (d._obsHistorico.some(h => h.texto.trim() === txt)) {
-    toast('⚠️ Esta observación ya existe en el historial','error'); return;
+  const nombre = d._nombre || '';
+  const hist = getObsForProject(nombre);
+  if (hist.some(h => h.texto.trim() === txt)) {
+    toast('⚠️ Esta observación ya existe','error'); return;
   }
   const now = new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
-  // PUSH (agregar al final) — nunca borrar los anteriores
-  d._obsHistorico.push({
+  const newObs = {
     texto:   txt,
     fecha:   now,
     usuario: window._currentUser?.email?.split('@')[0] || 'Usuario',
     ts:      new Date().toISOString(),
-  });
+  };
+  // Guardar en store independiente
+  addObsToStore(nombre, newObs);
+  // Sincronizar al registro en DB
+  d._obsHistorico = getObsForProject(nombre);
   renderObsHistorico(d);
   document.getElementById('obs-nueva').value = '';
   saveToStorage();
   broadcastChange();
-  toast(`💬 Observación ${d._obsHistorico.length} registrada`);
+  toast(`💬 Observación ${d._obsHistorico.length} registrada y guardada`);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
