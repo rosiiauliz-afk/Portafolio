@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v10.3 - obs store independiente + desviacion dot + filtro cambios - 2026-06-04 -->
+<!-- v10.4 - fix prevRec + pm activos click correcto + showActiveProjects - 2026-06-04 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -1530,6 +1530,7 @@ async function loadExcel(buffer, filename) {
       }
 
       // ── CONTROL DE CAMBIOS: detectar cambio de estatus desde Excel ─────────
+      const prevRec = DB_PREV.find(e => (e._nombre||'').trim() === (rec._nombre||'').trim());
       if (prevRec && prevRec._estatus && prevRec._estatus !== '—') {
         const newEst = normEstatus(rec._estatus);
         if (newEst && newEst !== '—' && newEst !== prevRec._estatus) {
@@ -2476,7 +2477,7 @@ function buildPmActivos() {
   const leg = document.getElementById('leg-pm-activos');
   if(leg) leg.innerHTML = ACTIVOS.map(e =>
     '<span style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><span style="width:10px;height:10px;border-radius:2px;background:' + COLORS[e] + ';border:1px solid ' + BORDERS[e] + '"></span>' + e + '</span>'
-  ).join('') + '<span onclick="goToDataFiltered(\'\',\'\')" title="Ver proyectos activos en Data" style="margin-left:auto;font-size:12px;font-weight:700;color:var(--blue-t);cursor:pointer;text-decoration:underline;text-underline-offset:2px">' + total + ' activos en total →</span>';
+  ).join('') + '<span onclick="showActiveProjects()" title="Ver proyectos activos en Data" style="margin-left:auto;font-size:12px;font-weight:700;color:var(--blue-t);cursor:pointer;text-decoration:underline;text-underline-offset:2px">' + total + ' activos en total →</span>';
 
   destroyChart('ch-pm-activos');
   const canvas = document.getElementById('ch-pm-activos'); if(!canvas) return;
@@ -4157,7 +4158,7 @@ function buildPmActivosFromData(data) {
   const datasets=ACTIVOS.map(est=>({label:est,data:pms.map(pm=>dbActivos.filter(d=>d._pm===pm&&normEstatus(d._estatus)===est).length),backgroundColor:COLORS[est]+'cc',borderColor:BORDERS[est],borderWidth:1,borderRadius:3}));
   const total=dbActivos.length;
   const leg=document.getElementById('leg-pm-activos');
-  if(leg)leg.innerHTML=ACTIVOS.map(e=>'<span style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><span style="width:10px;height:10px;border-radius:2px;background:'+COLORS[e]+';border:1px solid '+BORDERS[e]+'"></span>'+e+'</span>').join('')+'<span onclick="goToDataFiltered(\'\',\'\')" title="Ver proyectos activos en Data" style="margin-left:auto;font-size:12px;font-weight:700;color:var(--blue-t);cursor:pointer;text-decoration:underline;text-underline-offset:2px">'+total+' activos en total →</span>';
+  if(leg)leg.innerHTML=ACTIVOS.map(e=>'<span style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><span style="width:10px;height:10px;border-radius:2px;background:'+COLORS[e]+';border:1px solid '+BORDERS[e]+'"></span>'+e+'</span>').join('')+'<span onclick="showActiveProjects()" title="Ver proyectos activos en Data" style="margin-left:auto;font-size:12px;font-weight:700;color:var(--blue-t);cursor:pointer;text-decoration:underline;text-underline-offset:2px">'+total+' activos en total →</span>';
   destroyChart('ch-pm-activos');
   const canvas=document.getElementById('ch-pm-activos');if(!canvas)return;
   charts['ch-pm-activos']=new Chart(canvas,{type:'bar',data:{labels:pms,datasets},
@@ -4166,16 +4167,16 @@ function buildPmActivosFromData(data) {
         if(el.length){
           const pm=pms[el[0].index];
           const est=ACTIVOS[el[0].datasetIndex];
-          // Ir a Data con PM y estatus filtrados
-          _selectedEstatus=est?[est]:[];
+          // Limpiar filtros previos
+          _selectedEstatus = est ? [est] : ['En tiempo','En riesgo','Con problema'];
           updatePills();
-          const selPm=document.getElementById('f-pm');if(selPm)selPm.value=pm;
-          populateFilters();applyFilters();
+          const selPm=document.getElementById('f-pm'); if(selPm) selPm.value=pm;
+          populateFilters(); applyFilters();
           document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
           document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
           document.getElementById('page-data').classList.add('active');
           document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
-          toast(`🔗 Mostrando: ${pm} · ${est||'todos los activos'}`);
+          toast(`🔗 ${pm} · ${est||'proyectos activos'}`);
         }
       },
       plugins:{legend:{display:false},tooltip:{callbacks:{footer:items=>'Total activos: '+totalPorPm[items[0].dataIndex]}}},
@@ -4772,6 +4773,19 @@ function registrarCambio(rec, campo, valorAnterior, valorNuevo) {
 
 // Hook saveRecord para capturar cambios
 const _origSaveRecord = window.saveRecord;
+
+// Navegar a Data mostrando solo proyectos activos (En tiempo, En riesgo, Con problema)
+function showActiveProjects() {
+  _selectedEstatus = ['En tiempo','En riesgo','Con problema'];
+  updatePills();
+  const selPm = document.getElementById('f-pm'); if(selPm) selPm.value='';
+  populateFilters(); applyFilters();
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-data').classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
+  toast('🔗 Mostrando proyectos activos en Data');
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // CONTROL DE CAMBIOS — página visual
