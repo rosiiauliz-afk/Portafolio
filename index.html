@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v10.4 - fix prevRec + pm activos click correcto + showActiveProjects - 2026-06-04 -->
+<!-- v10.5 - OBS en Firebase bidireccional + CAMBIOS en Firebase - 2026-06-05 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -206,11 +206,40 @@ function startDataSync() {
   onValue(pmoRef, (snapshot) => {
     const data = snapshot.val();
     if (!data) return;
-    const incomingHash = data.savedAt + '|' + (data.DB?.length||0) + '|' + (data.SNAPS?.length||0);
+    const incomingHash = data.savedAt + '|' + (data.DB?.length||0) + '|' + (data.SNAPS?.length||0) + '|' + Object.keys(data.OBS||{}).length;
     if (window._lastFbHash === incomingHash) return;
     window._lastFbHash = incomingHash;
     window.DB  = data.DB  || [];
     window.RDB = data.RDB || [];
+
+    // ── Restaurar OBSERVACIONES desde Firebase (fuente de verdad) ────────────
+    if (data.OBS && typeof data.OBS === 'object') {
+      const localStore  = getObsStore();
+      const remoteStore = data.OBS;
+      // Merge: combinar remote + local sin duplicados
+      const merged = JSON.parse(JSON.stringify(remoteStore));
+      Object.keys(localStore).forEach(nombre => {
+        if (!merged[nombre]) merged[nombre] = [];
+        localStore[nombre].forEach(obs => {
+          if (!merged[nombre].some(h => h.ts === obs.ts)) merged[nombre].push(obs);
+        });
+        merged[nombre].sort((a,b) => new Date(a.ts||0) - new Date(b.ts||0));
+      });
+      saveObsStore(merged);
+    }
+
+    // ── Restaurar CAMBIOS desde Firebase ─────────────────────────────────────
+    if (data.CAMBIOS && Array.isArray(data.CAMBIOS) && data.CAMBIOS.length) {
+      try {
+        const localC  = JSON.parse(localStorage.getItem('pmo_cambios')||'[]');
+        const remoteC = data.CAMBIOS;
+        const seen    = new Set(localC.map(c=>c.ts));
+        const merged  = [...localC, ...remoteC.filter(c=>!seen.has(c.ts))];
+        merged.sort((a,b)=>new Date(b.ts||0)-new Date(a.ts||0));
+        localStorage.setItem('pmo_cambios', JSON.stringify(merged.slice(0,300)));
+        CAMBIOS = merged;
+      } catch(e) {}
+    }
     const remoteSNAPS = data.SNAPS || [];
     const localSNAPS  = window.SNAPS || [];
     if (remoteSNAPS.length >= localSNAPS.length) {
@@ -240,6 +269,8 @@ window.saveToFirebase = function() {
       DB:       window.DB,
       RDB:      window.RDB,
       SNAPS:    window.SNAPS,
+      OBS:      getObsStore(),   // ← guardar store de observaciones en Firebase
+      CAMBIOS:  (()=>{ try{ return JSON.parse(localStorage.getItem('pmo_cambios')||'[]'); }catch(e){return [];} })(),
       pptxFile: window.pptxFile || '',
       xlsxFile: window.xlsxFile || '',
       savedAt:  new Date().toISOString() + '_' + Math.random().toString(36).slice(2,7),
@@ -3308,6 +3339,8 @@ function saveToStorage() {
       const payload = {
         DB, RDB,
         SNAPS,
+        OBS:    getObsStore(),
+        CAMBIOS:(()=>{ try{ return JSON.parse(localStorage.getItem('pmo_cambios')||'[]'); }catch(e){return [];} })(),
         pptxFile, xlsxFile,
         savedAt: new Date().toISOString(),
       };
@@ -3347,6 +3380,27 @@ function loadFromStorage() {
     SNAPS    = p.SNAPS    || [];
     pptxFile = p.pptxFile || '';
     xlsxFile = p.xlsxFile || '';
+    // Restaurar obs y cambios si están en el payload de localStorage
+    if (p.OBS && typeof p.OBS === 'object') {
+      const existing = getObsStore();
+      const merged = {...p.OBS};
+      Object.keys(existing).forEach(nombre => {
+        if (!merged[nombre]) merged[nombre] = [];
+        existing[nombre].forEach(obs => {
+          if (!merged[nombre].some(h=>h.ts===obs.ts)) merged[nombre].push(obs);
+        });
+      });
+      saveObsStore(merged);
+    }
+    if (p.CAMBIOS && Array.isArray(p.CAMBIOS) && p.CAMBIOS.length) {
+      try {
+        const cur = JSON.parse(localStorage.getItem('pmo_cambios')||'[]');
+        const seen = new Set(cur.map(c=>c.ts));
+        const merged = [...cur, ...p.CAMBIOS.filter(c=>!seen.has(c.ts))];
+        merged.sort((a,b)=>new Date(b.ts||0)-new Date(a.ts||0));
+        localStorage.setItem('pmo_cambios', JSON.stringify(merged.slice(0,300)));
+      } catch(e) {}
+    }
     DB.forEach(d => { d._estatus = normEstatus(d._estatus); });
     DB = applyOverrides(DB);
     deduplicateRDB();
