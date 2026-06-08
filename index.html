@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v10.6 - obs nodo Firebase separado pmo/obs - nunca se pierde - 2026-06-05 -->
+<!-- v10.5 - OBS en Firebase bidireccional + CAMBIOS en Firebase - 2026-06-05 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -206,11 +206,40 @@ function startDataSync() {
   onValue(pmoRef, (snapshot) => {
     const data = snapshot.val();
     if (!data) return;
-    const incomingHash = data.savedAt + '|' + (data.DB?.length||0) + '|' + (data.SNAPS?.length||0);
+    const incomingHash = data.savedAt + '|' + (data.DB?.length||0) + '|' + (data.SNAPS?.length||0) + '|' + Object.keys(data.OBS||{}).length;
     if (window._lastFbHash === incomingHash) return;
     window._lastFbHash = incomingHash;
     window.DB  = data.DB  || [];
     window.RDB = data.RDB || [];
+
+    // ── Restaurar OBSERVACIONES desde Firebase (fuente de verdad) ────────────
+    if (data.OBS && typeof data.OBS === 'object') {
+      const localStore  = getObsStore();
+      const remoteStore = data.OBS;
+      // Merge: combinar remote + local sin duplicados
+      const merged = JSON.parse(JSON.stringify(remoteStore));
+      Object.keys(localStore).forEach(nombre => {
+        if (!merged[nombre]) merged[nombre] = [];
+        localStore[nombre].forEach(obs => {
+          if (!merged[nombre].some(h => h.ts === obs.ts)) merged[nombre].push(obs);
+        });
+        merged[nombre].sort((a,b) => new Date(a.ts||0) - new Date(b.ts||0));
+      });
+      saveObsStore(merged);
+    }
+
+    // ── Restaurar CAMBIOS desde Firebase ─────────────────────────────────────
+    if (data.CAMBIOS && Array.isArray(data.CAMBIOS) && data.CAMBIOS.length) {
+      try {
+        const localC  = JSON.parse(localStorage.getItem('pmo_cambios')||'[]');
+        const remoteC = data.CAMBIOS;
+        const seen    = new Set(localC.map(c=>c.ts));
+        const merged  = [...localC, ...remoteC.filter(c=>!seen.has(c.ts))];
+        merged.sort((a,b)=>new Date(b.ts||0)-new Date(a.ts||0));
+        localStorage.setItem('pmo_cambios', JSON.stringify(merged.slice(0,300)));
+        CAMBIOS = merged;
+      } catch(e) {}
+    }
     const remoteSNAPS = data.SNAPS || [];
     const localSNAPS  = window.SNAPS || [];
     if (remoteSNAPS.length >= localSNAPS.length) {
@@ -221,6 +250,7 @@ function startDataSync() {
     window.DB.forEach(d => { d._estatus = window.normEstatus(d._estatus); });
     window.deduplicateRDB();
     if (window.DB.length || window.SNAPS.length) {
+      if (typeof syncObsToDb === 'function') syncObsToDb();
       window.restoreUIFromData();
       window.refreshAllViews();
       if (typeof window.renderSnaps === 'function') window.renderSnaps();
@@ -239,6 +269,8 @@ window.saveToFirebase = function() {
       DB:       window.DB,
       RDB:      window.RDB,
       SNAPS:    window.SNAPS,
+      OBS:      getObsStore(),   // ← guardar store de observaciones en Firebase
+      CAMBIOS:  (()=>{ try{ return JSON.parse(localStorage.getItem('pmo_cambios')||'[]'); }catch(e){return [];} })(),
       pptxFile: window.pptxFile || '',
       xlsxFile: window.xlsxFile || '',
       savedAt:  new Date().toISOString() + '_' + Math.random().toString(36).slice(2,7),
@@ -274,44 +306,6 @@ setTimeout(() => {
     box.style.background = '#e8f5e9'; box.style.borderColor = '#a5d6a7'; box.style.color = '#1b5e20';
   }
 }, 2000);
-
-// ── Nodo separado para observaciones: pmo/obs ─────────────────────────────
-// Este nodo NUNCA se toca al sincronizar Excel o datos del portafolio
-// Es la única fuente de verdad para observaciones
-
-window._saveObs = async function(nombre, obsArray) {
-  if (!window._fbDB || !nombre) return;
-  try {
-    // Limpiar el nombre para usarlo como clave Firebase (sin caracteres especiales)
-    const key = encodeURIComponent(nombre).replace(/\./g,'%2E').replace(/%/g,'_');
-    await set(ref(db, 'pmo/obs/' + key), {
-      nombre, obs: obsArray, updatedAt: new Date().toISOString()
-    });
-  } catch(e) { console.error('Error guardando obs:', e); }
-};
-
-window._getObs = async function(nombre) {
-  if (!window._fbDB || !nombre) return [];
-  try {
-    const key = encodeURIComponent(nombre).replace(/\./g,'%2E').replace(/%/g,'_');
-    const snap = await get(ref(db, 'pmo/obs/' + key));
-    const data = snap.val();
-    return data?.obs || [];
-  } catch(e) { return []; }
-};
-
-window._getAllObs = async function() {
-  if (!window._fbDB) return {};
-  try {
-    const snap = await get(ref(db, 'pmo/obs'));
-    const data = snap.val() || {};
-    const result = {};
-    Object.values(data).forEach(entry => {
-      if (entry.nombre && Array.isArray(entry.obs)) result[entry.nombre] = entry.obs;
-    });
-    return result;
-  } catch(e) { return {}; }
-};
 </script>
 <style>
 :root{
@@ -417,7 +411,11 @@ main{overflow:auto}
 .table-card{background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
 .table-top{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:.5px solid var(--border)}
 .table-count{font-size:13px;color:var(--text2);font-weight:600}
-.table-wrap{overflow-x:auto}
+.table-wrap{overflow-x:auto;max-height:calc(100vh - 280px);overflow-y:auto;position:relative}
+.table-wrap thead th{position:sticky;top:0;z-index:2;background:var(--surface2)}
+.table-wrap::-webkit-scrollbar{height:6px;width:6px}
+.table-wrap::-webkit-scrollbar-track{background:var(--surface2)}
+.table-wrap::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
 table{width:100%;border-collapse:collapse}
 th{text-align:left;padding:10px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);background:var(--surface2);border-bottom:.5px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none}
 th:hover{color:var(--text)}
@@ -443,7 +441,8 @@ tr:hover td{background:var(--bg)}
 .chart-card{background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:1.25rem;box-shadow:var(--shadow)}
 .chart-card.full{grid-column:1/-1}
 .chart-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);margin-bottom:6px;display:flex;align-items:center;justify-content:space-between}
-.chart-total{font-size:13px;font-weight:900;color:var(--blue);text-transform:none;letter-spacing:0}
+.chart-total{font-size:13px;font-weight:900;color:var(--blue);text-transform:none;letter-spacing:0;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.chart-total:hover{opacity:.75}
 .chart-wrap{position:relative;width:100%}
 .legend-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
 .leg-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)}
@@ -580,12 +579,12 @@ tr:hover td{background:var(--bg)}
     </div>
     <div style="margin-bottom:12px">
       <label style="font-size:11px;font-weight:700;color:#6b6a65;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Correo electrónico</label>
-      <input id="login-email" type="email" placeholder="usuario@empresa.com" onkeydown="if(event.key==='Enter')document.getElementById('login-pass').focus()"
+      <input id="login-email" type="email" placeholder="usuario@empresa.com" onkeydown="if(event.key===Enter)document.getElementById(login-pass).focus()"
         style="width:100%;padding:10px 12px;border:1.5px solid #e0ddd8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box">
     </div>
     <div style="margin-bottom:16px">
       <label style="font-size:11px;font-weight:700;color:#6b6a65;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Contraseña</label>
-      <input id="login-pass" type="password" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"
+      <input id="login-pass" type="password" placeholder="••••••••" onkeydown="if(event.key===Enter)doLogin()"
         style="width:100%;padding:10px 12px;border:1.5px solid #e0ddd8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box">
     </div>
     <div id="login-error" style="color:#c0392b;font-size:12px;margin-bottom:10px;min-height:16px;text-align:center"></div>
@@ -613,6 +612,7 @@ tr:hover td{background:var(--bg)}
     <button class="nav-btn" onclick="goPage('graficos',this)"><span class="nav-icon">📊</span>Gráficos</button>
     <button class="nav-btn" onclick="goPage('riesgos',this)"><span class="nav-icon">⚠️</span>Inventario Riesgos</button>
     <button class="nav-btn" onclick="goPage('historico',this)"><span class="nav-icon">🕐</span>Histórico</button>
+    <button class="nav-btn" onclick="goPage('cambios',this)"><span class="nav-icon">🔄</span>Control Cambios</button>
     <button class="nav-btn" id="nav-usuarios" onclick="goPage('usuarios',this);window.loadUsersList()" style="display:none"><span class="nav-icon">👥</span>Usuarios</button>
     <button class="nav-btn" onclick="doLogout()" style="margin-top:4px;color:var(--red);border-color:var(--red-bg)"><span class="nav-icon">🚪</span>Cerrar sesión</button>
   </nav>
@@ -743,17 +743,27 @@ tr:hover td{background:var(--bg)}
           style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
           ✅ Finalizado
         </button>
+        <button class="est-pill" data-val="__cambios__" onclick="clickEstPill(this)"
+          style="padding:4px 11px;border-radius:20px;border:.5px solid #bbb;background:#f7f6f3;color:#5f5e5a;font-size:12px;cursor:pointer;font-weight:500">
+          ⚠️ Con cambios
+        </button>
       </div>
       <select id="f-pm"   onchange="applyFilters()"><option value="">Todos los PM</option></select>
       <select id="f-resp" onchange="applyFilters()"><option value="">Todos los Resp. TI</option></select>
       <select id="f-dev"  onchange="applyFilters()"><option value="">Todos los devs</option></select>
       <select id="f-area" onchange="applyFilters()"><option value="">Todas las áreas</option></select>
       <select id="f-fase" onchange="applyFilters()"><option value="">Todas las fases</option></select>
+      <select id="f-weeklyti" onchange="applyFilters()" title="Filtro Desarrollo TI">
+        <option value="">Todos (Dev TI)</option>
+        <option value="Si">⭐ Visible Weekly TI</option>
+        <option value="No">Sin Weekly TI</option>
+      </select>
       <button class="btn btn-ghost" onclick="clearFilters()">✕ Limpiar</button>
+      <button class="btn btn-ghost" onclick="openColConfig()" title="Configurar columnas" style="padding:6px 8px">⚙️ Cols</button>
     </div>
     <div class="table-card">
       <div class="table-top"><span class="table-count" id="tbl-count">—</span></div>
-      <div class="table-wrap"><table><thead id="tHead"></thead><tbody id="tBody"></tbody></table></div>
+      <div class="table-wrap"><table id="main-table"><thead id="tHead"></thead><tbody id="tBody"></tbody></table></div>
     </div>
   </div>
 
@@ -776,10 +786,10 @@ tr:hover td{background:var(--bg)}
       <span id="g-count" style="font-size:12px;color:var(--text2);font-weight:600;margin-left:4px"></span>
     </div>
     <div class="charts-grid">
-      <div class="chart-card"><div class="chart-title">Por tipo <span class="chart-total" id="ct-tipo">—</span></div><div class="legend-row" id="leg-tipo"></div><div class="chart-wrap" style="height:200px"><canvas id="ch-tipo"></canvas></div></div>
-      <div class="chart-card"><div class="chart-title">Por estatus <span class="chart-total" id="ct-est">—</span></div><div class="legend-row" id="leg-est"></div><div class="chart-wrap" style="height:200px"><canvas id="ch-est"></canvas></div></div>
-      <div class="chart-card full"><div class="chart-title">Por área <span class="chart-total" id="ct-area">—</span></div><div class="chart-wrap" style="height:230px"><canvas id="ch-area"></canvas></div></div>
-      <div class="chart-card full"><div class="chart-title">Por PM <span class="chart-total" id="ct-pm">—</span></div><div class="chart-wrap" style="height:230px"><canvas id="ch-pm"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">Por tipo <span class="chart-total" id="ct-tipo" onclick="goToDataFiltered('','')" title="Ver todos en Data">—</span></div><div class="legend-row" id="leg-tipo"></div><div class="chart-wrap" style="height:200px"><canvas id="ch-tipo"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">Por estatus <span class="chart-total" id="ct-est" onclick="goToDataFiltered('','')" title="Ver todos en Data">—</span></div><div class="legend-row" id="leg-est"></div><div class="chart-wrap" style="height:200px"><canvas id="ch-est"></canvas></div></div>
+      <div class="chart-card full"><div class="chart-title">Por área <span class="chart-total" id="ct-area" onclick="goToDataFiltered('','')" title="Ver todos en Data">—</span></div><div class="chart-wrap" style="height:230px"><canvas id="ch-area"></canvas></div></div>
+      <div class="chart-card full"><div class="chart-title">Por PM <span class="chart-total" id="ct-pm" onclick="goToDataFiltered('','')" title="Ver todos en Data">—</span></div><div class="chart-wrap" style="height:230px"><canvas id="ch-pm"></canvas></div></div>
       <div class="chart-card full">
         <div class="chart-title">PM · Proyectos activos por estatus
           <span style="font-size:10px;font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0">(excluye En pausa y Sin iniciar)</span>
@@ -903,6 +913,49 @@ tr:hover td{background:var(--bg)}
           <div style="color:var(--text2)">Solo lectura · No exporta · No sincroniza · Ideal para consulta</div>
         </div>
       </div>
+    </div>
+  </div>
+  <!-- ══ CONTROL DE CAMBIOS ══════════════════════════════════════════════════ -->
+  <div class="page" id="page-cambios">
+    <div class="page-header">
+      <div><div class="page-title">Control de Cambios</div><div class="page-sub">Historial de modificaciones de estatus en proyectos e iniciativas</div></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" onclick="clearAllCambios()" style="color:var(--red)">🗑️ Limpiar historial</button>
+        <button class="btn btn-ghost" onclick="exportCambiosHTML()" style="border-color:var(--blue-t);color:var(--blue-t);font-weight:700">📄 Exportar</button>
+      </div>
+    </div>
+    <style>
+    .chg-filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1.25rem;background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:12px 14px;box-shadow:var(--shadow)}
+    .chg-filters select,.chg-filters input{font-size:13px;padding:6px 10px;border:.5px solid var(--border2);border-radius:var(--rs);background:var(--surface);height:34px;color:var(--text)}
+    .chg-timeline{display:flex;flex-direction:column;gap:0}
+    .chg-item{display:flex;gap:14px;padding:0 0 14px 0}
+    .chg-line{display:flex;flex-direction:column;align-items:center;flex-shrink:0;width:32px}
+    .chg-dot{width:11px;height:11px;border-radius:50%;flex-shrink:0;margin-top:4px}
+    .chg-vline{flex:1;width:2px;background:var(--border2);margin-top:3px;min-height:20px}
+    .chg-card{background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:12px 16px;flex:1;box-shadow:var(--shadow)}
+    .chg-proyecto{font-size:13px;font-weight:700;color:var(--text)}
+    .chg-meta{font-size:11px;color:var(--text3);margin-top:2px}
+    .chg-old{background:#fbeaea;color:#791f1f;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600}
+    .chg-new{background:#e4f2de;color:#1b5e20;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:700}
+    .chg-arrow{color:var(--text3)}
+    </style>
+    <div class="chg-filters">
+      <input type="text" id="chg-q" placeholder="🔍 Buscar proyecto..." oninput="renderCambiosPage()">
+      <select id="chg-f-tipo" onchange="renderCambiosPage()">
+        <option value="">Todos los tipos</option>
+        <option value="Proyecto">Proyecto</option>
+        <option value="Requerimiento">Requerimiento</option>
+      </select>
+      <button class="btn btn-ghost" onclick="document.getElementById('chg-q').value='';document.getElementById('chg-f-tipo').value='';renderCambiosPage()" style="height:34px">✕ Limpiar</button>
+      <span id="chg-count" style="font-size:12px;color:var(--text3);font-weight:600;margin-left:4px"></span>
+    </div>
+    <div id="cambios-content">
+      <div id="cambios-empty" style="background:var(--surface);border:.5px solid var(--border);border-radius:var(--r);padding:3rem;text-align:center;box-shadow:var(--shadow)">
+        <div style="font-size:40px;margin-bottom:12px">🔄</div>
+        <div style="font-size:15px;font-weight:700;margin-bottom:8px">Control de Cambios</div>
+        <div style="font-size:13px;color:var(--text3)">Los cambios de estatus se registran automáticamente cuando editas un registro en el módulo Data.<br>Edita el estatus de algún proyecto para ver el historial aquí.</div>
+      </div>
+      <div id="cambios-list" class="chg-timeline" style="display:none"></div>
     </div>
   </div>
 
@@ -1085,26 +1138,36 @@ tr:hover td{background:var(--bg)}
   </div>
 </div>
 
-<!-- Modal Observaciones -->
+<!-- Modal configuración columnas -->
+<div class="overlay" id="ovColConfig">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-hdr"><span class="modal-title">⚙️ Configurar columnas</span>
+      <button class="modal-close" onclick="document.getElementById('ovColConfig').classList.remove('open')">×</button>
+    </div>
+    <div style="padding:16px">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Arrastra para reordenar · Desactiva para ocultar</div>
+      <div id="col-config-list" style="display:flex;flex-direction:column;gap:6px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="resetColConfig()">↺ Restablecer</button>
+      <button class="btn btn-primary" onclick="saveColConfig()">✅ Aplicar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal observaciones -->
 <div class="overlay" id="ovObs">
-  <div class="modal" style="max-width:520px">
-    <div class="modal-hdr">
-      <span class="modal-title">💬 Observaciones</span>
+  <div class="modal" style="max-width:500px">
+    <div class="modal-hdr"><span class="modal-title">💬 Observaciones Luis</span>
       <button class="modal-close" onclick="document.getElementById('ovObs').classList.remove('open')">×</button>
     </div>
     <div style="padding:16px">
-      <div id="obs-nombre" style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px;padding:8px 12px;background:var(--surface2);border-radius:var(--rs)"></div>
-      <!-- Historial -->
-      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Historial de comentarios</div>
-      <div id="obs-list" style="max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
-        <div style="font-size:13px;color:var(--text3);padding:12px;text-align:center">Cargando...</div>
-      </div>
-      <!-- Nueva obs -->
-      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Nuevo comentario</div>
+      <div id="obs-proyecto-name" style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px"></div>
+      <div id="obs-historico" style="display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;margin-bottom:14px"></div>
       <div style="display:flex;gap:8px">
-        <textarea id="obs-input" placeholder="Escribe tu comentario aquí..." rows="2"
-          style="flex:1;padding:8px 10px;border:.5px solid var(--border2);border-radius:var(--rs);font-size:13px;resize:vertical;font-family:inherit;color:var(--text)"></textarea>
-        <button class="btn btn-primary" onclick="saveObsManual()" style="align-self:flex-end;white-space:nowrap">💾 Guardar</button>
+        <textarea id="obs-nueva" placeholder="Escribe una observación..." rows="2"
+          style="flex:1;padding:8px 10px;border:.5px solid var(--border2);border-radius:var(--rs);font-size:13px;resize:vertical;font-family:inherit"></textarea>
+        <button class="btn btn-primary" onclick="addObservacion()" style="align-self:flex-end">Agregar</button>
       </div>
     </div>
   </div>
@@ -1154,6 +1217,7 @@ function goPage(name, btn) {
   if (name === 'graficos' && DB.length)  renderCharts();
   if (name === 'riesgos')                { populateRFilters(); applyRFilters(); }
   if (name === 'historico')              renderSnaps();
+  if (name === 'cambios')                renderCambiosPage();
   if (name === 'usuarios')              { if(typeof window.loadUsersList==='function') window.loadUsersList(); }
 }
 
@@ -1356,7 +1420,9 @@ const EXCEL_MAP = {
   _nombre:     ['nombre','name','iniciativa','proyecto','requerimiento','descripcion','descripción','titulo','título'],
   _estatus:    ['estatus','estado','status','semaforo','semáforo','estatus actual','estado actual'],
   _pm:         ['pm','p.m.','project manager','gestor','lider proyecto','líder proyecto','lider de proyecto','líder de proyecto','gerente proyecto','gerente de proyecto','responsable proyecto','responsable del proyecto','pm asignado','pm del proyecto'],
-  _obs:        ['observaciones luis','observaciones','observacion','observación','comentarios','comentarios luis','notas','obs','obs luis','luis comentarios'],
+  _obs:        ['observaciones luis','observaciones','observacion','observación','comentarios','comentarios luis','notas','obs luis','luis'],
+  _weeklyTI:   ['visible weekly ti','weekly ti','visible weekly','weekly','visible ti','visibilidad ti','dev ti'],
+  _desviacion: ['desviacion','desviación','desvio','desvío','tuvo desviacion','con desviacion','deviation'],
   _tl:         ['tl','t.l.','tech lead','technical lead','lider tecnico','líder técnico','lider técnico','líder tecnico','lider tech','líder tech','responsable técnico','responsable tecnico','lead técnico','lead tecnico','tl asignado'],
   _resp:       ['responsable ti','responsable de ti','owner ti','lider ti','líder ti'],
   _dev:        ['desarrollador','desarrolladores','developer','dev','programador','ingeniero de software','asignado a','asignado','recurso asignado','recurso'],
@@ -1444,6 +1510,9 @@ async function loadExcel(buffer, filename) {
       console.log('📊 Valores de estatus en Excel:', rawVals);
     }
 
+    // Guardar DB anterior para preservar historial de obs y detectar cambios de estatus
+    const DB_PREV = JSON.parse(JSON.stringify(DB));
+
     // Mantener proyectos del PPTX; reemplazar requerimientos del Excel
     DB = DB.filter(d => d._source === 'pptx');
     // Limpiar riesgos que venían del Excel anterior (conservar los del PPTX)
@@ -1457,6 +1526,58 @@ async function loadExcel(buffer, filename) {
         let v = String(row[idx]||'').trim();
         if (field === '_avance') { rec[field] = parseInt(v)||0; }
         else { rec[field] = v || '—'; }
+      }
+      // Normalizar _weeklyTI → 'Si' o 'No'
+      if (rec._weeklyTI && rec._weeklyTI !== '—') {
+        const w = rec._weeklyTI.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+        rec._weeklyTI = /^(s|si|yes|1|true|x)$/.test(w) ? 'Si' : 'No';
+      }
+      // Normalizar _desviacion → 'Si' o 'No' (solo aplica a Finalizados)
+      if (rec._desviacion && rec._desviacion !== '—') {
+        const r = rec._desviacion.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+        rec._desviacion = /^(s|si|yes|1|true|x)$/.test(r) ? 'Si' : 'No';
+      }
+      // _obs: mantener como texto libre
+      if (!rec._obs || rec._obs === '—') rec._obs = '';
+
+      // ── HISTÓRICO OBSERVACIONES: usar store independiente ─────────────────
+      // 1. Siempre cargar historial del store local (nunca se pierde)
+      rec._obsHistorico = getObsForProject(rec._nombre || '');
+
+      // 2. Si el Excel trae obs nueva, agregarla al store y al registro
+      if (rec._obs && rec._obs.trim() !== '') {
+        const obsNorm = rec._obs.trim();
+        const yaExiste = rec._obsHistorico.some(h => h.texto.trim() === obsNorm);
+        if (!yaExiste) {
+          const newObs = {
+            texto:   obsNorm,
+            fecha:   'Excel · ' + new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),
+            usuario: 'Excel',
+            ts:      new Date().toISOString(),
+          };
+          addObsToStore(rec._nombre || '', newObs);
+          rec._obsHistorico = getObsForProject(rec._nombre || '');
+        }
+      }
+
+      // ── CONTROL DE CAMBIOS: detectar cambio de estatus desde Excel ─────────
+      const prevRec = DB_PREV.find(e => (e._nombre||'').trim() === (rec._nombre||'').trim());
+      if (prevRec && prevRec._estatus && prevRec._estatus !== '—') {
+        const newEst = normEstatus(rec._estatus);
+        if (newEst && newEst !== '—' && newEst !== prevRec._estatus) {
+          // Estatus cambió en el Excel — registrar en Control de Cambios
+          loadCambios();
+          CAMBIOS.unshift({
+            ts:            new Date().toISOString(),
+            tipo:          rec._tipo || '—',
+            nombre:        rec._nombre || '—',
+            campo:         '_estatus',
+            valorAnterior: prevRec._estatus,
+            valorNuevo:    newEst,
+            usuario:       'Excel (sincronización)',
+          });
+          saveCambios();
+        }
       }
       // Normalizar tipo a los 3 valores válidos
       rec._tipo = normTipo(rec._tipo);
@@ -1495,24 +1616,6 @@ async function loadExcel(buffer, filename) {
         delete rec._riesgos;
       }
       DB.push(rec);
-      // ── Si el Excel trae observación, guardarla en Firebase (nodo separado) ──
-      const obsDelExcel = rec._obs && rec._obs !== '—' ? rec._obs.trim() : '';
-      if (obsDelExcel && typeof window._saveObs === 'function') {
-        // Leer obs actuales y agregar la nueva sin borrar historial
-        (async () => {
-          const hist = await window._getObs(rec._nombre);
-          const yaExiste = hist.some(h => h.texto === obsDelExcel);
-          if (!yaExiste) {
-            hist.push({
-              texto:   obsDelExcel,
-              usuario: 'Excel',
-              fecha:   new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),
-              ts:      new Date().toISOString(),
-            });
-            await window._saveObs(rec._nombre, hist);
-          }
-        })();
-      }
     });
 
     if (sinEstatus > 0) {
@@ -1982,10 +2085,16 @@ function semDot(v) {
   if (!m) return `<span class="sem-dot" style="background:#e0e0e0;border:1.5px solid #bdbdbd" title="${v||'—'}"></span>`;
   return `<span class="sem-dot" style="background:${m.hex};border:1.5px solid ${m.bdr}" title="${m.label}"></span>`;
 }
-function semBadge(v) {
+function semBadge(v, d) {
   const m = semGet(v);
   if (!m) return `<span class="badge b-gray">${v||'—'}</span>`;
-  return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:5px;font-size:11px;font-weight:700;white-space:nowrap;background:${m.bg};color:${m.color};border:1.5px solid ${m.bdr}"><span style="width:10px;height:10px;border-radius:50%;background:${m.hex};border:1.5px solid ${m.bdr};flex-shrink:0"></span>${m.label}</span>`;
+  // Para Finalizados: mostrar punto de desviación si aplica
+  let desviDot = '';
+  if (m.label === 'Finalizado' && d && d._desviacion) {
+    const esSi = d._desviacion === 'Si';
+    desviDot = `<span title="Desviación: ${esSi?'Sí':'No'}" style="width:9px;height:9px;border-radius:50%;background:${esSi?'#c0392b':'#27ae60'};border:1.5px solid ${esSi?'#922b21':'#1e8449'};flex-shrink:0;margin-left:2px"></span>`;
+  }
+  return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:5px;font-size:11px;font-weight:700;white-space:nowrap;background:${m.bg};color:${m.color};border:1.5px solid ${m.bdr}"><span style="width:10px;height:10px;border-radius:50%;background:${m.hex};border:1.5px solid ${m.bdr};flex-shrink:0"></span>${m.label}${desviDot}</span>`;
 }
 function estatBadge(v) { return semGet(v) ? 'b-sem-ok' : 'b-gray'; }
 function prioBadge(v)   { const s=(v||'').toLowerCase(); return /alta|high|crítica|critica|urgent|1/.test(s)?'b-red':/media|medium|normal|2/.test(s)?'b-amber':/baja|low|3/.test(s)?'b-green':'b-gray'; }
@@ -2011,6 +2120,7 @@ const PILL_COLORS = {
   'En riesgo':   ['#fff8e1','#f9a825','#633806'],
   'Con problema':['#fbeaea','#c62828','#a0342b'],
   'Finalizado':  ['#e8f0fe','#1a5fb4','#0d3b78'],
+  '__cambios__': ['#fff8e1','#f9a825','#e65100'],
 };
 let _selectedEstatus = []; // vacío = todos
 
@@ -2032,11 +2142,16 @@ function updatePills() {
   document.querySelectorAll('.est-pill').forEach(btn => {
     const val = btn.dataset.val;
     const isAll = val === '';
-    const isActive = isAll ? _selectedEstatus.length === 0 : _selectedEstatus.includes(val);
+    const isActive = isAll ? (_selectedEstatus.length === 0) : _selectedEstatus.includes(val);
     if (isAll) {
       btn.style.background = isActive ? 'var(--blue-bg)' : '#f7f6f3';
       btn.style.border     = isActive ? '1.5px solid var(--blue)' : '.5px solid #bbb';
       btn.style.color      = isActive ? 'var(--blue-t)' : '#5f5e5a';
+      btn.style.fontWeight = isActive ? '700' : '500';
+    } else if (val === '__cambios__') {
+      btn.style.background = isActive ? '#fff8e1' : '#f7f6f3';
+      btn.style.border     = isActive ? '1.5px solid #f9a825' : '.5px solid #bbb';
+      btn.style.color      = isActive ? '#e65100' : '#5f5e5a';
       btn.style.fontWeight = isActive ? '700' : '500';
     } else {
       const c = PILL_COLORS[val] || ['#f7f6f3','#bbb','#5f5e5a'];
@@ -2050,7 +2165,7 @@ function updatePills() {
 
 function clearFilters() {
   document.getElementById('f-q').value = '';
-  ['f-tipo','f-pm','f-resp','f-dev','f-area','f-fase'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  ['f-tipo','f-pm','f-resp','f-dev','f-area','f-fase','f-weeklyti'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
   _selectedEstatus = [];
   updatePills();
   applyFilters();
@@ -2065,10 +2180,18 @@ function applyFilters() {
   const fdev  = document.getElementById('f-dev')?.value || '';
   const fa    = document.getElementById('f-area')?.value || '';
   const ff    = document.getElementById('f-fase')?.value || '';
+  const fwti  = document.getElementById('f-weeklyti')?.value || '';
+  const filtroCambios = _selectedEstatus.includes('__cambios__');
+  const estatusFiltro = _selectedEstatus.filter(e => e !== '__cambios__');
+  loadCambios();
+  const nombresConCambios = new Set(CAMBIOS.map(c=>c.nombre));
   filteredDB = DB.filter(d => {
     const eLabel = normEstatus(d._estatus);
-    const eOk = _selectedEstatus.length === 0 || _selectedEstatus.includes(eLabel);
-    return (!ft||d._tipo===ft)&&eOk&&(!fp||d._pm===fp)&&(!fresp||d._resp===fresp)&&
+    const eOk    = estatusFiltro.length === 0 || estatusFiltro.includes(eLabel);
+    const wtiOk  = !fwti || (d._weeklyTI||'') === fwti;
+    const finOk  = !(fwti==='Si' && eLabel==='Finalizado');
+    const cambioOk = !filtroCambios || nombresConCambios.has(d._nombre);
+    return (!ft||d._tipo===ft)&&eOk&&wtiOk&&finOk&&cambioOk&&(!fp||d._pm===fp)&&(!fresp||d._resp===fresp)&&
            (!fdev||d._dev===fdev)&&(!fa||d._area===fa)&&(!ff||d._fase===ff)&&
            (!q||COLS.some(cx=>String(d[cx.k]||'').toLowerCase().includes(q)));
   });
@@ -2083,28 +2206,42 @@ function applyFilters() {
 function sortBy(i) { sortCol===i?sortDir*=-1:(sortCol=i,sortDir=1); applyFilters(); }
 
 function renderTable() {
+  const visCols = COLS.filter(c=>c.vis!==false);
   document.getElementById('tbl-count').textContent = filteredDB.length+' de '+DB.length+' registros';
-  document.getElementById('tHead').innerHTML = '<tr>'+COLS.map((c,i)=>
-    `<th onclick="sortBy(${i})">${c.l} <span class="sa">${sortCol===i?(sortDir>0?'▲':'▼'):'↕'}</span></th>`).join('')+'<th>Acciones</th></tr>';
+  document.getElementById('tHead').innerHTML = '<tr>'+visCols.map((c,i)=>
+    `<th draggable="true" ondragstart="colDragStart(event)" ondragover="colDragOver(event)" ondrop="colDrop(event)" data-k="${c.k}" onclick="sortBy(${COLS.indexOf(c)})" style="cursor:pointer">${c.l} <span class="sa">${sortCol===COLS.indexOf(c)?(sortDir>0?'▲':'▼'):'↕'}</span></th>`).join('')+'<th>Obs</th><th>Acciones</th></tr>';
 
   if (!filteredDB.length) {
-    document.getElementById('tBody').innerHTML=`<tr><td colspan="${COLS.length+1}"><div class="empty-state"><div class="empty-icon">${DB.length?'🔍':'📋'}</div><div>${DB.length?'Sin resultados':'Carga un archivo para ver datos'}</div></div></td></tr>`;
+    document.getElementById('tBody').innerHTML=`<tr><td colspan="${visCols.length+2}"><div class="empty-state"><div class="empty-icon">${DB.length?'🔍':'📋'}</div><div>${DB.length?'Sin resultados':'Carga un archivo para ver datos'}</div></div></td></tr>`;
     return;
   }
+  loadCambios();
   document.getElementById('tBody').innerHTML = filteredDB.map(d => {
     const ri = DB.indexOf(d);
-    const cells = COLS.map(c => {
+    // Detectar si tuvo cambio de estatus reciente
+    const tuvoCambio = CAMBIOS.some(c=>c.nombre===d._nombre && c.campo==='_estatus');
+    const cells = visCols.map(c => {
       const v=d[c.k];
       if (c.k==='_tipo')      return `<td><span class="badge ${tipoBadge(v)}">${v||'—'}</span></td>`;
-      if (c.k==='_estatus')   return `<td>${semBadge(v)}</td>`;
+      if (c.k==='_nombre')    return `<td style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v||''}">${tuvoCambio?'⚠️ ':''}<span title="${tuvoCambio?'Este proyecto tuvo cambios de estatus. Ver Control de Cambios.':''}">${v||'—'}</span></td>`;
+      if (c.k==='_estatus')   return `<td>${semBadge(v, d)}</td>`;
       if (c.k==='_prioridad') return `<td><span class="badge ${prioBadge(v)}">${v||'—'}</span></td>`;
       if (c.k==='_avance')    return `<td><div style="display:flex;align-items:center;gap:8px;min-width:90px">
         <div style="flex:1;background:var(--border);border-radius:3px;height:5px"><div style="background:var(--blue);border-radius:3px;height:5px;width:${v||0}%"></div></div>
         <span style="font-size:11px;font-weight:700;color:var(--text2)">${v||0}%</span></div></td>`;
+      if (c.k==='_weeklyTI')  return `<td style="text-align:center">${v==='Si'?'⭐':'—'}</td>`;
+      if (c.k==='_retraso')   return `<td style="text-align:center">${v==='Si'?'<span style="color:#c0392b;font-weight:700">⚠️ Sí</span>':'<span style="color:#27ae60">✅ No</span>'}</td>`;
       return `<td title="${v||''}">${v||'—'}</td>`;
     }).join('');
-    return `<tr>${cells}<td><div class="td-actions">
-      <button class="btn btn-ghost btn-sm" onclick="openObs(${ri})" title="Ver/agregar observaciones" id="obs-btn-${ri}" style="position:relative">💬</button>
+    // Ícono observaciones
+    const obsCount = (d._obsHistorico||[]).length + (d._obs&&d._obs!=='—'&&d._obs!==''?1:0);
+    const obsIcon = `<td style="text-align:center">
+      <button title="${obsCount?obsCount+' observación(es)':'Sin observaciones'}" onclick="openObsModal(${ri})"
+        style="background:none;border:none;cursor:pointer;font-size:15px;position:relative">
+        💬${obsCount?`<span style="position:absolute;top:-4px;right:-6px;background:#c0392b;color:#fff;border-radius:50%;font-size:9px;width:14px;height:14px;display:flex;align-items:center;justify-content:center;font-weight:700">${obsCount>9?'9+':obsCount}</span>`:''}
+      </button>
+    </td>`;
+    return `<tr>${cells}${obsIcon}<td><div class="td-actions">
       <button class="btn btn-ghost btn-sm" onclick="openModal(${ri})">✏️</button>
       <button class="btn btn-ghost btn-sm" style="color:#1a5fb4;border-color:#1a5fb4" onclick="exportSinglePptx(${ri})" title="Descargar slide PPT de esta iniciativa">📑</button>
       <button class="btn btn-danger btn-sm" onclick="openDel(${ri})">🗑️</button>
@@ -2158,8 +2295,13 @@ function saveRecord(){
   rec._avance=parseInt(rec._avance)||0;
   rec._estatus = normEstatus(rec._estatus);
   if(editIdx!==null){
+    const prevEstatus = DB[editIdx]._estatus;
     DB[editIdx]={...DB[editIdx],...rec};
     saveOverride(DB[editIdx]); // persiste edición encima de Drive
+    // Registrar cambio de estatus si cambió
+    if (prevEstatus !== rec._estatus && rec._estatus && rec._estatus !== '—') {
+      registrarCambio(DB[editIdx], '_estatus', prevEstatus, rec._estatus);
+    }
     toast('✅ Registro actualizado');
   } else {
     rec._source='manual';
@@ -2278,12 +2420,14 @@ function destroyChart(id){if(charts[id]){charts[id].destroy();delete charts[id];
 function buildDona(cid,lid,tid,data){
   const labels=data.map(e=>e[0]),vals=data.map(e=>e[1]),tot=vals.reduce((s,v)=>s+v,0);
   const cols=labels.map((_,i)=>PAL[i%PAL.length]);
-  if(lid)document.getElementById(lid).innerHTML=labels.map((l,i)=>`<span class="leg-item"><span class="leg-dot" style="background:${cols[i]}"></span>${l} (${vals[i]})</span>`).join('');
+  if(lid)document.getElementById(lid).innerHTML=labels.map((l,i)=>`<span class="leg-item" style="cursor:pointer" onclick="goToDataFiltered('${l}','')" title="Ver en Data"><span class="leg-dot" style="background:${cols[i]}"></span>${l} (${vals[i]})</span>`).join('');
   if(tid)document.getElementById(tid).textContent='Total: '+tot;
   destroyChart(cid);
   charts[cid]=new Chart(document.getElementById(cid),{type:'doughnut',
     data:{labels,datasets:[{data:vals,backgroundColor:cols,borderWidth:2,borderColor:'#fff'}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},
+    options:{responsive:true,maintainAspectRatio:false,
+      onClick:(evt,el)=>{ if(el.length){const lbl=labels[el[0].index]; goToDataFiltered(lbl,''); } },
+      plugins:{legend:{display:false},
       tooltip:{callbacks:{label:c=>`${c.label}: ${c.parsed} (${Math.round(c.parsed/tot*100)}%)`}}}}});
 }
 function buildBar(cid,tid,data){
@@ -2292,7 +2436,9 @@ function buildBar(cid,tid,data){
   destroyChart(cid);
   charts[cid]=new Chart(document.getElementById(cid),{type:'bar',
     data:{labels,datasets:[{data:vals,backgroundColor:labels.map((_,i)=>PAL[i%PAL.length]),borderRadius:5}]},
-    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      onClick:(evt,el)=>{ if(el.length){const lbl=labels[el[0].index]; goToDataFiltered('',lbl); } },
+      plugins:{legend:{display:false},
       tooltip:{callbacks:{label:c=>`${c.parsed.x} (${Math.round(c.parsed.x/tot*100)}%)`}}},
       scales:{x:{ticks:{font:{size:11}}},y:{ticks:{font:{size:11}}}}}});
 }
@@ -2362,7 +2508,7 @@ function buildPmActivos() {
   const leg = document.getElementById('leg-pm-activos');
   if(leg) leg.innerHTML = ACTIVOS.map(e =>
     '<span style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><span style="width:10px;height:10px;border-radius:2px;background:' + COLORS[e] + ';border:1px solid ' + BORDERS[e] + '"></span>' + e + '</span>'
-  ).join('') + '<span style="margin-left:auto;font-size:12px;font-weight:700;color:var(--blue-t)">' + total + ' activos en total</span>';
+  ).join('') + '<span onclick="showActiveProjects()" title="Ver proyectos activos en Data" style="margin-left:auto;font-size:12px;font-weight:700;color:var(--blue-t);cursor:pointer;text-decoration:underline;text-underline-offset:2px">' + total + ' activos en total →</span>';
 
   destroyChart('ch-pm-activos');
   const canvas = document.getElementById('ch-pm-activos'); if(!canvas) return;
@@ -3193,6 +3339,8 @@ function saveToStorage() {
       const payload = {
         DB, RDB,
         SNAPS,
+        OBS:    getObsStore(),
+        CAMBIOS:(()=>{ try{ return JSON.parse(localStorage.getItem('pmo_cambios')||'[]'); }catch(e){return [];} })(),
         pptxFile, xlsxFile,
         savedAt: new Date().toISOString(),
       };
@@ -3232,6 +3380,27 @@ function loadFromStorage() {
     SNAPS    = p.SNAPS    || [];
     pptxFile = p.pptxFile || '';
     xlsxFile = p.xlsxFile || '';
+    // Restaurar obs y cambios si están en el payload de localStorage
+    if (p.OBS && typeof p.OBS === 'object') {
+      const existing = getObsStore();
+      const merged = {...p.OBS};
+      Object.keys(existing).forEach(nombre => {
+        if (!merged[nombre]) merged[nombre] = [];
+        existing[nombre].forEach(obs => {
+          if (!merged[nombre].some(h=>h.ts===obs.ts)) merged[nombre].push(obs);
+        });
+      });
+      saveObsStore(merged);
+    }
+    if (p.CAMBIOS && Array.isArray(p.CAMBIOS) && p.CAMBIOS.length) {
+      try {
+        const cur = JSON.parse(localStorage.getItem('pmo_cambios')||'[]');
+        const seen = new Set(cur.map(c=>c.ts));
+        const merged = [...cur, ...p.CAMBIOS.filter(c=>!seen.has(c.ts))];
+        merged.sort((a,b)=>new Date(b.ts||0)-new Date(a.ts||0));
+        localStorage.setItem('pmo_cambios', JSON.stringify(merged.slice(0,300)));
+      } catch(e) {}
+    }
     DB.forEach(d => { d._estatus = normEstatus(d._estatus); });
     DB = applyOverrides(DB);
     deduplicateRDB();
@@ -3317,6 +3486,7 @@ function importSession() {
 // ── Restaurar UI a partir de datos en memoria ────────────────────────────────
 function restoreUIFromData() {
   if (!DB.length && !SNAPS.length) return;
+  syncObsToDb(); // siempre restaurar obs desde store local antes de renderizar
   if (DB.length) {
     document.getElementById('landing').style.display='none';
     document.getElementById('dashboard').style.display='block';
@@ -4042,11 +4212,27 @@ function buildPmActivosFromData(data) {
   const datasets=ACTIVOS.map(est=>({label:est,data:pms.map(pm=>dbActivos.filter(d=>d._pm===pm&&normEstatus(d._estatus)===est).length),backgroundColor:COLORS[est]+'cc',borderColor:BORDERS[est],borderWidth:1,borderRadius:3}));
   const total=dbActivos.length;
   const leg=document.getElementById('leg-pm-activos');
-  if(leg)leg.innerHTML=ACTIVOS.map(e=>'<span style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><span style="width:10px;height:10px;border-radius:2px;background:'+COLORS[e]+';border:1px solid '+BORDERS[e]+'"></span>'+e+'</span>').join('')+'<span style="margin-left:auto;font-size:12px;font-weight:700;color:var(--blue-t)">'+total+' activos en total</span>';
+  if(leg)leg.innerHTML=ACTIVOS.map(e=>'<span style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><span style="width:10px;height:10px;border-radius:2px;background:'+COLORS[e]+';border:1px solid '+BORDERS[e]+'"></span>'+e+'</span>').join('')+'<span onclick="showActiveProjects()" title="Ver proyectos activos en Data" style="margin-left:auto;font-size:12px;font-weight:700;color:var(--blue-t);cursor:pointer;text-decoration:underline;text-underline-offset:2px">'+total+' activos en total →</span>';
   destroyChart('ch-pm-activos');
   const canvas=document.getElementById('ch-pm-activos');if(!canvas)return;
   charts['ch-pm-activos']=new Chart(canvas,{type:'bar',data:{labels:pms,datasets},
     options:{responsive:true,maintainAspectRatio:false,layout:{padding:{top:24}},
+      onClick:(evt,el)=>{
+        if(el.length){
+          const pm=pms[el[0].index];
+          const est=ACTIVOS[el[0].datasetIndex];
+          // Limpiar filtros previos
+          _selectedEstatus = est ? [est] : ['En tiempo','En riesgo','Con problema'];
+          updatePills();
+          const selPm=document.getElementById('f-pm'); if(selPm) selPm.value=pm;
+          populateFilters(); applyFilters();
+          document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+          document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+          document.getElementById('page-data').classList.add('active');
+          document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
+          toast(`🔗 ${pm} · ${est||'proyectos activos'}`);
+        }
+      },
       plugins:{legend:{display:false},tooltip:{callbacks:{footer:items=>'Total activos: '+totalPorPm[items[0].dataIndex]}}},
       scales:{x:{stacked:true,ticks:{font:{size:11}}},y:{stacked:true,beginAtZero:true,ticks:{font:{size:11},stepSize:1}}}},
     plugins:[{id:'pmTotalLabels',afterDatasetsDraw(chart){const{ctx}=chart;ctx.save();ctx.font='bold 11px system-ui';ctx.fillStyle='#181816';ctx.textAlign='center';ctx.textBaseline='bottom';const meta0=chart.getDatasetMeta(datasets.length-1);meta0.data.forEach((bar,i)=>{const tot=totalPorPm[i];if(tot>0){const x=bar.x,y=bar.y-4,w=ctx.measureText(tot).width+8;ctx.fillStyle='rgba(255,255,255,0.85)';ctx.fillRect(x-w/2,y-14,w,16);ctx.fillStyle='#1a5fb4';ctx.fillText(tot,x,y);}});ctx.restore();}}]});
@@ -4424,90 +4610,384 @@ async function _buildChartsPngFromData(data) {
 
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
-    ['ovData','ovDel','ovRiesgo','ovRDel','ovSync','ovExport'].forEach(id=>{const el=document.getElementById(id);if(el)el.classList.remove('open');});
+    ['ovData','ovDel','ovRiesgo','ovRDel','ovSync','ovExport','ovColConfig','ovObs'].forEach(id=>{const el=document.getElementById(id);if(el)el.classList.remove('open');});
   }
 });
-['ovData','ovDel','ovRiesgo','ovRDel','ovSync','ovExport','ovObs'].forEach(id=>{
+['ovData','ovDel','ovRiesgo','ovRDel','ovSync','ovExport','ovColConfig','ovObs'].forEach(id=>{
   const el=document.getElementById(id);if(!el)return;
   el.addEventListener('click',e=>{if(e.target===e.currentTarget)e.target.classList.remove('open');});
 });
 
 // ── Exponer funciones necesarias para el módulo Firebase ───────────────────
 // ══════════════════════════════════════════════════════════════════════════════
-// OBSERVACIONES — nodo Firebase separado pmo/obs
-// Nunca se sobreescribe al sincronizar Excel o portafolio
+// HISTORIAL DE OBSERVACIONES — almacenamiento independiente del DB
+// Clave: nombre del proyecto → array de observaciones
+// Esto garantiza que nunca se pierde sin importar recargas de Firebase o Excel
 // ══════════════════════════════════════════════════════════════════════════════
-let _obsNombreActual = null;
+const OBS_KEY = 'pmo_obs_hist';
 
-async function openObs(ri) {
-  const d = DB[ri];
-  if (!d) return;
-  _obsNombreActual = d._nombre;
-  document.getElementById('obs-nombre').textContent = '📋 ' + (d._nombre||'Sin nombre');
-  document.getElementById('obs-input').value = '';
-  document.getElementById('ovObs').classList.add('open');
-  // Cargar historial desde Firebase
-  document.getElementById('obs-list').innerHTML = '<div style="font-size:13px;color:var(--text3);padding:12px;text-align:center">⏳ Cargando observaciones...</div>';
-  const hist = await window._getObs(d._nombre);
-  renderObsList(hist);
+function getObsStore() {
+  try { return JSON.parse(localStorage.getItem(OBS_KEY) || '{}'); } catch(e) { return {}; }
+}
+function saveObsStore(store) {
+  try { localStorage.setItem(OBS_KEY, JSON.stringify(store)); } catch(e) {}
+}
+function getObsForProject(nombre) {
+  return getObsStore()[nombre] || [];
+}
+function addObsToStore(nombre, obs) {
+  const store = getObsStore();
+  if (!store[nombre]) store[nombre] = [];
+  // No duplicados
+  if (!store[nombre].some(h => h.texto.trim() === obs.texto.trim())) {
+    store[nombre].push(obs);
+    saveObsStore(store);
+  }
+}
+// Sincronizar obs del store al DB (llamar después de cargar datos)
+function syncObsToDb() {
+  const store = getObsStore();
+  DB.forEach(d => {
+    if (!d._nombre || d._nombre === '—') return;
+    const hist = store[d._nombre] || [];
+    d._obsHistorico = hist;
+  });
 }
 
-function renderObsList(hist) {
-  const container = document.getElementById('obs-list');
-  if (!hist || !hist.length) {
-    container.innerHTML = '<div style="font-size:13px;color:var(--text3);padding:16px;text-align:center;background:var(--surface2);border-radius:var(--rs)">Sin observaciones registradas.<br><span style="font-size:11px">Agrega el primer comentario abajo.</span></div>';
+// ══════════════════════════════════════════════════════════════════════════════
+// MEJORA 7 — COLUMNAS CONFIGURABLES (drag & drop)
+// ══════════════════════════════════════════════════════════════════════════════
+const COLS_DEFAULT = [
+  {k:'_tipo',      l:'Tipo',           vis:true},
+  {k:'_nombre',    l:'Nombre',         vis:true},
+  {k:'_estatus',   l:'Estatus',        vis:true},
+  {k:'_pm',        l:'PM',             vis:true},
+  {k:'_resp',      l:'Responsable TI', vis:true},
+  {k:'_area',      l:'Área',           vis:true},
+  {k:'_prioridad', l:'Prioridad',      vis:true},
+  {k:'_avance',    l:'Avance %',       vis:true},
+  {k:'_fase',      l:'Fase',           vis:true},
+  {k:'_dev',       l:'Desarrollador',  vis:true},
+  {k:'_weeklyTI',  l:'Weekly TI',      vis:false},
+  {k:'_desviacion',l:'Desviación',      vis:false},
+];
+
+function loadColConfig() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('pmo_cols')||'null');
+    if (stored && stored.length) return stored;
+  } catch(e) {}
+  return COLS_DEFAULT.map(c=>({...c}));
+}
+function saveColConfig() {
+  const items = document.querySelectorAll('#col-config-list .col-item');
+  const newCols = [...items].map(el => ({
+    k:   el.dataset.k,
+    l:   COLS_DEFAULT.find(c=>c.k===el.dataset.k)?.l || el.dataset.k,
+    vis: el.querySelector('input[type=checkbox]').checked,
+  }));
+  try { localStorage.setItem('pmo_cols', JSON.stringify(newCols)); } catch(e) {}
+  COLS.length=0; newCols.forEach(c=>COLS.push(c));
+  document.getElementById('ovColConfig').classList.remove('open');
+  renderTable();
+  toast('✅ Columnas guardadas');
+}
+function resetColConfig() {
+  try { localStorage.removeItem('pmo_cols'); } catch(e) {}
+  COLS.length=0; COLS_DEFAULT.forEach(c=>COLS.push({...c}));
+  document.getElementById('ovColConfig').classList.remove('open');
+  renderTable();
+  toast('↺ Columnas restablecidas');
+}
+function openColConfig() {
+  const list = document.getElementById('col-config-list');
+  list.innerHTML = COLS.map(c=>`
+    <div class="col-item" data-k="${c.k}" draggable="true"
+      style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--surface2);border:.5px solid var(--border);border-radius:var(--rs);cursor:grab;user-select:none"
+      ondragstart="colDragStart(event)" ondragover="colDragOver(event)" ondrop="colDrop(event)">
+      <span style="font-size:14px;color:var(--text3)">☰</span>
+      <span style="flex:1;font-size:13px;font-weight:600">${c.l}</span>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;color:var(--text3)">
+        <input type="checkbox" ${c.vis?'checked':''} style="cursor:pointer"> Visible
+      </label>
+    </div>`).join('');
+  document.getElementById('ovColConfig').classList.add('open');
+}
+let _dragColEl = null;
+function colDragStart(e) { _dragColEl=e.currentTarget; e.dataTransfer.effectAllowed='move'; }
+function colDragOver(e)  { e.preventDefault(); e.dataTransfer.dropEffect='move'; }
+function colDrop(e) {
+  e.preventDefault();
+  const target = e.currentTarget;
+  if (_dragColEl && target !== _dragColEl) {
+    const list = target.parentNode;
+    const items = [...list.children];
+    const fromI = items.indexOf(_dragColEl);
+    const toI   = items.indexOf(target);
+    if (fromI < toI) list.insertBefore(_dragColEl, target.nextSibling);
+    else             list.insertBefore(_dragColEl, target);
+  }
+}
+// Inicializar COLS desde localStorage
+(function initCols() {
+  const loaded = loadColConfig();
+  COLS.length = 0;
+  loaded.forEach(c => COLS.push(c));
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MEJORA 1 — OBSERVACIONES LUIS
+// ══════════════════════════════════════════════════════════════════════════════
+let _obsIdx = null;
+
+function openObsModal(dbIdx) {
+  _obsIdx = dbIdx;
+  const d = DB[dbIdx];
+  document.getElementById('obs-proyecto-name').textContent = d._nombre || '—';
+  renderObsHistorico(d);
+  document.getElementById('obs-nueva').value = '';
+  document.getElementById('ovObs').classList.add('open');
+}
+
+function renderObsHistorico(d) {
+  const hist = Array.isArray(d._obsHistorico) ? d._obsHistorico : [];
+  const container = document.getElementById('obs-historico');
+  if (!hist.length) {
+    container.innerHTML = `<div style="font-size:13px;color:var(--text3);padding:8px 0;text-align:center">Sin observaciones aún. Agrega la primera abajo. 👇</div>`;
     return;
   }
-  // Mostrar del más reciente al más antiguo
-  const sorted = [...hist].sort((a,b)=>new Date(b.ts||0)-new Date(a.ts||0));
-  container.innerHTML = sorted.map((h,i)=>`
-    <div style="background:var(--surface2);border-radius:var(--rs);padding:10px 13px;border-left:3px solid ${h.usuario==='Excel'?'#e67e22':'var(--blue)'}">
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;flex-wrap:wrap">
-        <span style="font-size:11px;font-weight:700;padding:1px 7px;border-radius:20px;background:${h.usuario==='Excel'?'#fff3e0':'var(--blue-bg)'};color:${h.usuario==='Excel'?'#e65100':'var(--blue-t)'}">
-          ${h.usuario==='Excel'?'📗 Excel':'👤 '+h.usuario}
+  // Mostrar del más nuevo al más antiguo
+  const sorted = [...hist].reverse();
+  container.innerHTML = sorted.map((h, i) => `
+    <div style="background:var(--surface2);border-radius:var(--rs);padding:10px 12px;border-left:3px solid ${h.usuario==='Excel'?'#e67e22':'var(--blue)'}">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+        <span style="font-size:10px;font-weight:700;color:${h.usuario==='Excel'?'#e67e22':'var(--blue-t)'}">
+          ${h.usuario==='Excel'?'📗 Excel':'💬 '+h.usuario}
         </span>
-        <span style="font-size:10px;color:var(--text3)">${h.fecha||''}</span>
+        <span style="font-size:10px;color:var(--text3)">· ${h.fecha||''}</span>
         <span style="margin-left:auto;font-size:10px;color:var(--text3)">Obs. ${hist.length - i}</span>
       </div>
-      <div style="font-size:13px;color:var(--text);line-height:1.5">${h.texto}</div>
+      <div style="font-size:13px;color:var(--text2)">${h.texto}</div>
     </div>`).join('');
 }
 
-async function saveObsManual() {
-  const txt = document.getElementById('obs-input').value.trim();
-  if (!txt) { toast('Escribe un comentario antes de guardar','error'); return; }
-  if (!_obsNombreActual) return;
-
-  const btn = document.querySelector('#ovObs .btn-primary');
-  if (btn) { btn.disabled=true; btn.textContent='Guardando...'; }
-
-  try {
-    const hist = await window._getObs(_obsNombreActual);
-    const yaExiste = hist.some(h=>h.texto===txt);
-    if (yaExiste) { toast('Este comentario ya existe','error'); return; }
-    hist.push({
-      texto:   txt,
-      usuario: window._currentUser?.email?.split('@')[0] || 'Usuario',
-      fecha:   new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),
-      ts:      new Date().toISOString(),
-    });
-    await window._saveObs(_obsNombreActual, hist);
-    renderObsList(hist);
-    document.getElementById('obs-input').value = '';
-    toast(`💬 Observación ${hist.length} guardada en Firebase`);
-  } catch(e) {
-    toast('Error al guardar: '+e.message, 'error');
-  } finally {
-    if (btn) { btn.disabled=false; btn.textContent='💾 Guardar'; }
+function addObservacion() {
+  const txt = document.getElementById('obs-nueva').value.trim();
+  if (!txt) { toast('Escribe una observación primero','error'); return; }
+  if (_obsIdx === null) return;
+  const d = DB[_obsIdx];
+  const nombre = d._nombre || '';
+  const hist = getObsForProject(nombre);
+  if (hist.some(h => h.texto.trim() === txt)) {
+    toast('⚠️ Esta observación ya existe','error'); return;
   }
+  const now = new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  const newObs = {
+    texto:   txt,
+    fecha:   now,
+    usuario: window._currentUser?.email?.split('@')[0] || 'Usuario',
+    ts:      new Date().toISOString(),
+  };
+  // Guardar en store independiente
+  addObsToStore(nombre, newObs);
+  // Sincronizar al registro en DB
+  d._obsHistorico = getObsForProject(nombre);
+  renderObsHistorico(d);
+  document.getElementById('obs-nueva').value = '';
+  saveToStorage();
+  broadcastChange();
+  toast(`💬 Observación ${d._obsHistorico.length} registrada y guardada`);
 }
 
-window.normEstatus       = normEstatus;
-window.deduplicateRDB    = deduplicateRDB;
-window.restoreUIFromData = restoreUIFromData;
-window.refreshAllViews   = refreshAllViews;
-window.toast             = toast;
-window.renderSnaps       = renderSnaps;
+// ══════════════════════════════════════════════════════════════════════════════
+// MEJORA 2 — CONTROL DE CAMBIOS (registro automático de cambios de estatus)
+// ══════════════════════════════════════════════════════════════════════════════
+let CAMBIOS = [];
+
+function loadCambios() {
+  try { CAMBIOS = JSON.parse(localStorage.getItem('pmo_cambios')||'[]'); } catch(e) { CAMBIOS=[]; }
+}
+function saveCambios() {
+  try { localStorage.setItem('pmo_cambios', JSON.stringify(CAMBIOS.slice(0,300))); } catch(e) {}
+}
+
+function registrarCambio(rec, campo, valorAnterior, valorNuevo) {
+  loadCambios();
+  CAMBIOS.unshift({
+    ts:           new Date().toISOString(),
+    tipo:         rec._tipo   || '—',
+    nombre:       rec._nombre || '—',
+    campo,
+    valorAnterior: String(valorAnterior||'—'),
+    valorNuevo:    String(valorNuevo||'—'),
+    usuario:      window._currentUser?.email?.split('@')[0] || 'Usuario',
+  });
+  saveCambios();
+}
+
+// Hook saveRecord para capturar cambios
+const _origSaveRecord = window.saveRecord;
+
+// Navegar a Data mostrando solo proyectos activos (En tiempo, En riesgo, Con problema)
+function showActiveProjects() {
+  _selectedEstatus = ['En tiempo','En riesgo','Con problema'];
+  updatePills();
+  const selPm = document.getElementById('f-pm'); if(selPm) selPm.value='';
+  populateFilters(); applyFilters();
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-data').classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
+  toast('🔗 Mostrando proyectos activos en Data');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CONTROL DE CAMBIOS — página visual
+// ══════════════════════════════════════════════════════════════════════════════
+function renderCambiosPage() {
+  loadCambios();
+  const q     = (document.getElementById('chg-q')?.value||'').toLowerCase();
+  const fTipo = document.getElementById('chg-f-tipo')?.value||'';
+  const filtered = CAMBIOS.filter(c=>
+    (!q     || c.nombre.toLowerCase().includes(q)) &&
+    (!fTipo || c.tipo===fTipo)
+  );
+  const cnt = document.getElementById('chg-count');
+  if(cnt) cnt.textContent = `${filtered.length} cambio${filtered.length!==1?'s':''}`;
+  const empty = document.getElementById('cambios-empty');
+  const list  = document.getElementById('cambios-list');
+  if(!filtered.length){
+    empty.style.display=''; list.style.display='none';
+    if(CAMBIOS.length && (q||fTipo)) empty.innerHTML=`<div style="font-size:40px;margin-bottom:12px">🔍</div><div style="font-size:14px;font-weight:700">Sin resultados</div>`;
+    return;
+  }
+  empty.style.display='none'; list.style.display='flex';
+  const SEM_DOT={'En tiempo':'#4caf50','En riesgo':'#ffc107','Con problema':'#f44336','Sin iniciar':'#9e9e9e','En pausa':'#ff9800','Finalizado':'#607d8b'};
+  list.innerHTML = filtered.map((c,i)=>{
+    const dt   = new Date(c.ts);
+    const fecha= dt.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'});
+    const hora = dt.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+    const dot  = SEM_DOT[c.valorNuevo]||'var(--blue)';
+    const isLast = i===filtered.length-1;
+    const tipoBg = c.tipo==='Proyecto'?'background:#deeaf8;color:#0d3b78':'background:#eceafe;color:#4a3899';
+    return `<div class="chg-item">
+      <div class="chg-line">
+        <span class="chg-dot" style="background:${dot};box-shadow:0 0 0 3px ${dot}33"></span>
+        ${!isLast?'<div class="chg-vline"></div>':''}
+      </div>
+      <div class="chg-card">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px">
+          <div>
+            <div class="chg-proyecto">${c.nombre}</div>
+            <div class="chg-meta">
+              ${c.tipo?`<span style="padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;${tipoBg}">${c.tipo}</span> · `:''}
+              <span style="font-weight:600">${c.usuario}</span> · ${fecha} a las ${hora}
+            </div>
+          </div>
+          <button onclick="goToDataFromCambio('${c.nombre.replace(/'/g,"\\'")}');" title="Ver en Data"
+            style="background:none;border:.5px solid var(--blue);color:var(--blue-t);border-radius:var(--rs);padding:3px 8px;font-size:11px;cursor:pointer;font-weight:700;white-space:nowrap;flex-shrink:0">→ Data</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-size:11px;font-weight:600;color:var(--text3)">Estatus:</span>
+          <span class="chg-old">${c.valorAnterior}</span>
+          <span class="chg-arrow">→</span>
+          <span class="chg-new">${c.valorNuevo}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function goToDataFromCambio(nombre) {
+  document.getElementById('f-q').value = nombre;
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-data').classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
+  populateFilters(); applyFilters();
+}
+
+function clearAllCambios() {
+  if(!confirm('¿Eliminar todo el historial de cambios?')) return;
+  CAMBIOS=[];
+  try{localStorage.removeItem('pmo_cambios');}catch(e){}
+  renderCambiosPage();
+  toast('🗑️ Historial limpiado');
+}
+
+function exportCambiosHTML() {
+  loadCambios();
+  if(!CAMBIOS.length){toast('Sin cambios registrados','error');return;}
+  const now=new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Control Cambios · PMO</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,'Segoe UI',sans-serif;color:#181816;background:#f5f4f1}
+.body{max-width:900px;margin:0 auto;padding:2rem}
+table{width:100%;border-collapse:collapse}th{padding:9px 12px;font-size:10px;font-weight:700;text-transform:uppercase;color:#888;background:#f0ede8;border-bottom:.5px solid #ddd;text-align:left}
+td{padding:9px 12px;border-bottom:.5px solid #eee;font-size:12px}tr:nth-child(even) td{background:#fafaf9}
+.old{background:#fbeaea;color:#791f1f;padding:2px 7px;border-radius:4px;text-decoration:line-through}
+.new{background:#e4f2de;color:#1b5e20;padding:2px 7px;border-radius:4px;font-weight:700}
+@media print{body{background:#fff}@page{margin:1.5cm}}</style></head><body><div class="body">
+<div style="background:linear-gradient(135deg,#0d3b78,#1a5fb4);color:#fff;border-radius:12px;padding:1.5rem 2rem;margin-bottom:1.5rem">
+  <div style="font-size:20px;font-weight:900;margin-bottom:4px">🔄 Control de Cambios · PMO TI</div>
+  <div style="font-size:12px;opacity:.8">Generado el ${now} · ${CAMBIOS.length} cambios</div>
+</div>
+<div style="background:#fff;border-radius:10px;border:.5px solid #ddd;overflow:hidden">
+<table><thead><tr><th>Fecha</th><th>Proyecto</th><th>Tipo</th><th>Estatus anterior</th><th>Estatus nuevo</th><th>Usuario</th></tr></thead>
+<tbody>${CAMBIOS.map(c=>{
+  const dt=new Date(c.ts);
+  const f=dt.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'})+' '+dt.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+  const tb=c.tipo==='Proyecto'?'background:#deeaf8;color:#0d3b78':'background:#eceafe;color:#4a3899';
+  return`<tr><td style="color:#888;white-space:nowrap">${f}</td><td style="font-weight:600">${c.nombre}</td>
+  <td><span style="padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;${tb}">${c.tipo||'—'}</span></td>
+  <td><span class="old">${c.valorAnterior}</span></td>
+  <td><span class="new">${c.valorNuevo}</span></td>
+  <td style="color:#888">${c.usuario}</td></tr>`;
+}).join('')}</tbody></table></div>
+<div style="text-align:center;padding:1rem;font-size:11px;color:#888;margin-top:1rem">PMO TI · ${now}</div>
+</div></body></html>`;
+  const blob=new Blob([html],{type:'text/html'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download=`Control-Cambios-${new Date().toISOString().slice(0,10)}.html`;a.click();
+  toast('📄 Exportado');
+}
+function goToDataFiltered(estatus, tipo) {
+  if (estatus === '__sin_estatus__') {
+    _selectedEstatus = [];
+    updatePills();
+    populateFilters();
+    filteredDB = DB.filter(d => {
+      const tipoOk = !tipo || d._tipo === tipo;
+      return tipoOk && normEstatus(d._estatus) === '—';
+    });
+  } else if (estatus === '__prio_ti__') {
+    _selectedEstatus = [];
+    updatePills();
+    populateFilters();
+    filteredDB = DB.filter(d => {
+      const tipoOk = !tipo || d._tipo === tipo;
+      const v = String(d._prioTI||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+      return tipoOk && /^(si|yes|1|true|x)$/.test(v);
+    });
+  } else {
+    _selectedEstatus = estatus ? [estatus] : [];
+    updatePills();
+    if (tipo) { const selT=document.getElementById('f-tipo'); if(selT) selT.value=tipo; }
+    populateFilters();
+    filteredDB = DB.filter(d => {
+      const tipoOk  = !tipo || d._tipo === tipo;
+      const semOk   = !estatus || normEstatus(d._estatus) === estatus;
+      return tipoOk && semOk;
+    });
+  }
+  renderTable();
+  // Navegar a Data
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-data').classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
+  const cnt = document.getElementById('tbl-count');
+  if(cnt) cnt.textContent = filteredDB.length+' de '+DB.length+' registros';
+}
 </script>
 </body>
 </html>
