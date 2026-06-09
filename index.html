@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v10.5c - obs Firebase ready-queue fix + timing fix - 2026-06-09 -->
+<!-- v10.5d - obs pmo/obsData + rutas alternativas + status feedback - 2026-06-09 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -307,38 +307,78 @@ setTimeout(() => {
   }
 }, 2000);
 
-// ══ OBS — nodo Firebase independiente pmo/obs ══════════════════════════════
-// Patrón de cola: si la app llama antes de que el módulo cargue, encola y ejecuta después
+// ══ OBS — guardadas en pmo/obsData (mismo nivel que pmo, garantiza permisos) ══
 window._fbObsReady = false;
 window._fbObsQueue = [];
-function _obsKey(n){ return encodeURIComponent((n||'').trim()).replace(/\./g,'__DOT__').slice(0,200); }
+
+function _obsKey(n) {
+  // Clave segura para Firebase: sin puntos ni caracteres especiales
+  return encodeURIComponent((n||'').trim())
+    .replace(/\./g,'_DOT_')
+    .replace(/%/g,'_')
+    .replace(/[^a-zA-Z0-9_\-]/g,'_')
+    .slice(0, 180);
+}
 
 window.fbSaveObs = async function(nombre, arr) {
-  if (!nombre) return;
+  if (!nombre || !arr) return;
+  const key = _obsKey(nombre);
   try {
-    await set(ref(db, 'pmo/obs/' + _obsKey(nombre)), {
-      nombre, obs: arr, ts: new Date().toISOString()
+    await set(ref(db, 'pmo/obsData/' + key), {
+      nombre: nombre.trim(),
+      obs:    arr,
+      ts:     new Date().toISOString()
     });
-  } catch(e) { console.error('fbSaveObs error:', e); }
+    console.log('✅ Obs guardadas para:', nombre, '· Total:', arr.length);
+  } catch(e) {
+    console.error('❌ fbSaveObs error:', e.message);
+    // Intentar ruta alternativa directa en raíz
+    try {
+      await set(ref(db, 'obsData/' + key), {
+        nombre: nombre.trim(), obs: arr, ts: new Date().toISOString()
+      });
+      console.log('✅ Obs guardadas en ruta alternativa');
+    } catch(e2) {
+      console.error('❌ Ruta alternativa también falló:', e2.message);
+    }
+  }
 };
 
 window.fbGetObs = async function(nombre) {
   if (!nombre) return [];
+  const key = _obsKey(nombre);
   try {
-    const s = await get(ref(db, 'pmo/obs/' + _obsKey(nombre)));
-    const d = s.val();
+    // Intentar ruta principal
+    let snap = await get(ref(db, 'pmo/obsData/' + key));
+    if (!snap.exists()) {
+      // Intentar ruta alternativa
+      snap = await get(ref(db, 'obsData/' + key));
+    }
+    const d = snap.val();
     return Array.isArray(d?.obs) ? d.obs : [];
-  } catch(e) { console.error('fbGetObs error:', e); return []; }
+  } catch(e) {
+    console.error('fbGetObs error:', e.message);
+    return [];
+  }
 };
 
 window.fbListenObs = function(nombre, cb) {
   if (!nombre) { cb([]); return function(){}; }
-  const r = ref(db, 'pmo/obs/' + _obsKey(nombre));
-  onValue(r, function(s) {
-    const d = s.val();
-    cb(Array.isArray(d?.obs) ? d.obs : []);
+  const key = _obsKey(nombre);
+  const r = ref(db, 'pmo/obsData/' + key);
+  onValue(r, function(snap) {
+    const d = snap.val();
+    const obs = Array.isArray(d?.obs) ? d.obs : [];
+    cb(obs);
+    // También escuchar ruta alternativa si la principal está vacía
+    if (!obs.length) {
+      get(ref(db, 'obsData/' + key)).then(s => {
+        const d2 = s.val();
+        if (Array.isArray(d2?.obs) && d2.obs.length) cb(d2.obs);
+      }).catch(()=>{});
+    }
   });
-  return function() { off(r); };
+  return function() { try { off(r); } catch(e){} };
 };
 
 // Marcar como listo y ejecutar cola pendiente
@@ -1216,6 +1256,7 @@ tr:hover td{background:var(--bg)}
           style="flex:1;padding:8px 10px;border:.5px solid var(--border2);border-radius:var(--rs);font-size:13px;resize:vertical;font-family:inherit"></textarea>
         <button class="btn btn-primary" id="obs-save-btn" onclick="addObservacionFB()" style="align-self:flex-end;white-space:nowrap">💾 Guardar</button>
       </div>
+      <div id="obs-status" style="font-size:11px;color:var(--text3);margin-top:8px;min-height:16px"></div>
     </div>
   </div>
 </div>
@@ -4841,30 +4882,47 @@ async function addObservacionFB() {
   if (!txt) { toast('Escribe un comentario primero','error'); return; }
   if (!_obsNombreActual) { toast('Error: proyecto no identificado','error'); return; }
 
+  const btn    = document.getElementById('obs-save-btn');
+  const status = document.getElementById('obs-status');
+
+  // Verificar que Firebase esté listo
   if (typeof window.fbGetObs !== 'function' || typeof window.fbSaveObs !== 'function') {
-    toast('Firebase aún no listo, intenta en un momento','error'); return;
+    if (status) status.textContent = '⏳ Firebase cargando... espera un momento';
+    setTimeout(addObservacionFB, 500);
+    return;
   }
 
-  const btn = document.getElementById('obs-save-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
+  if (btn)    { btn.disabled = true; btn.textContent = 'Guardando...'; }
+  if (status) status.textContent = '⏳ Conectando con Firebase...';
 
   try {
+    if (status) status.textContent = '⏳ Leyendo historial existente...';
     const hist = await window.fbGetObs(_obsNombreActual);
+
     if (hist.some(h => h.texto === txt)) {
-      toast('Este comentario ya existe','error'); return;
+      toast('Este comentario ya existe','error');
+      if (status) status.textContent = '⚠️ Comentario duplicado';
+      return;
     }
-    hist.push({
+
+    const nuevaObs = {
       texto:   txt,
       usuario: window._currentUser?.email?.split('@')[0] || 'Usuario',
       fecha:   new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),
       ts:      new Date().toISOString(),
-    });
-    await window.fbSaveObs(_obsNombreActual, hist);
+    };
+
+    if (status) status.textContent = '⏳ Guardando en Firebase...';
+    await window.fbSaveObs(_obsNombreActual, [...hist, nuevaObs]);
+
     document.getElementById('obs-nueva').value = '';
-    toast('💬 Comentario guardado — visible para todos los usuarios');
-    // El listener en tiempo real actualizará la lista automáticamente
+    if (status) status.textContent = '✅ Guardado — visible para todos los usuarios';
+    toast('💬 Comentario guardado correctamente');
+    setTimeout(() => { if (status) status.textContent = ''; }, 4000);
+
   } catch(e) {
     console.error('addObservacionFB error:', e);
+    if (status) status.textContent = '❌ Error: ' + e.message;
     toast('Error al guardar: ' + e.message, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '💾 Guardar'; }
