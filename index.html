@@ -366,6 +366,37 @@ if (window._fbObsQueue && window._fbObsQueue.length) {
   window._fbObsQueue.forEach(fn => fn());
   window._fbObsQueue = [];
 }
+
+// ══ CAMBIOS — nodo raíz cambiosData/ (nunca se sobreescribe) ═══════════════
+window.fbSaveCambio = async function(cambio) {  // Cada cambio tiene su propia clave por timestamp
+  const key = cambio.ts.replace(/[^0-9T]/g, '_').slice(0, 30);
+  try {
+    await set(ref(db, 'cambiosData/' + key), cambio);
+  } catch(e) { console.error('fbSaveCambio error:', e.message); }
+};
+
+window.fbGetCambios = async function() {
+  try {
+    const snap = await get(ref(db, 'cambiosData'));
+    const d = snap.val();
+    if (!d) return [];
+    return Object.values(d).sort((a,b) => new Date(b.ts) - new Date(a.ts));
+  } catch(e) { console.error('fbGetCambios error:', e.message); return []; }
+};
+
+window.fbListenCambios = function(cb) {
+  const r = ref(db, 'cambiosData');
+  onValue(r, function(snap) {
+    const d = snap.val();
+    if (!d) { cb([]); return; }
+    cb(Object.values(d).sort((a,b) => new Date(b.ts) - new Date(a.ts)));
+  });
+  return function() { try { off(r); } catch(e){} };
+};
+
+window.fbClearCambios = async function() {
+  try { await set(ref(db, 'cambiosData'), null); } catch(e) { console.error('fbClearCambios:', e.message); }
+};
 </script>
 <style>
 :root{
@@ -1635,9 +1666,7 @@ async function loadExcel(buffer, filename) {
       if (prevRec && prevRec._estatus && prevRec._estatus !== '—') {
         const newEst = normEstatus(rec._estatus);
         if (newEst && newEst !== '—' && newEst !== prevRec._estatus) {
-          // Estatus cambió en el Excel — registrar en Control de Cambios
-          loadCambios();
-          CAMBIOS.unshift({
+          const cambio = {
             ts:            new Date().toISOString(),
             tipo:          rec._tipo || '—',
             nombre:        rec._nombre || '—',
@@ -1645,8 +1674,12 @@ async function loadExcel(buffer, filename) {
             valorAnterior: prevRec._estatus,
             valorNuevo:    newEst,
             usuario:       'Excel (sincronización)',
-          });
-          saveCambios();
+          };
+          CAMBIOS.unshift(cambio);
+          // Guardar en Firebase (async, no bloquea)
+          if (typeof window.fbSaveCambio === 'function') {
+            window.fbSaveCambio(cambio).catch(e => console.warn('Cambio Excel Firebase:', e));
+          }
         }
       }
       // Normalizar tipo a los 3 valores válidos
@@ -4916,28 +4949,52 @@ function addObservacion() { addObservacionFB(); }
 // ══════════════════════════════════════════════════════════════════════════════
 // MEJORA 2 — CONTROL DE CAMBIOS (registro automático de cambios de estatus)
 // ══════════════════════════════════════════════════════════════════════════════
-let CAMBIOS = [];
+// ══════════════════════════════════════════════════════════════════════════════
+// CONTROL DE CAMBIOS — Firebase cambiosData/ (compartido, nunca se borra)
+// ══════════════════════════════════════════════════════════════════════════════
+let CAMBIOS = []; // caché local para filtros rápidos
+let _cambiosUnlisten = null;
 
 function loadCambios() {
-  try { CAMBIOS = JSON.parse(localStorage.getItem('pmo_cambios')||'[]'); } catch(e) { CAMBIOS=[]; }
+  // No hace nada — los datos vienen de Firebase via _cambiosUnlisten
+  // Mantenemos la función por compatibilidad con código que la llama
 }
 function saveCambios() {
-  try { localStorage.setItem('pmo_cambios', JSON.stringify(CAMBIOS.slice(0,300))); } catch(e) {}
+  // No hace nada — se guarda directamente en Firebase
 }
 
-function registrarCambio(rec, campo, valorAnterior, valorNuevo) {
-  loadCambios();
-  CAMBIOS.unshift({
-    ts:           new Date().toISOString(),
-    tipo:         rec._tipo   || '—',
-    nombre:       rec._nombre || '—',
+async function registrarCambio(rec, campo, valorAnterior, valorNuevo) {
+  const cambio = {
+    ts:            new Date().toISOString(),
+    tipo:          rec._tipo    || '—',
+    nombre:        rec._nombre  || '—',
     campo,
     valorAnterior: String(valorAnterior||'—'),
     valorNuevo:    String(valorNuevo||'—'),
-    usuario:      window._currentUser?.email?.split('@')[0] || 'Usuario',
-  });
-  saveCambios();
+    usuario:       window._currentUser?.email?.split('@')[0] || 'Usuario',
+  };
+  CAMBIOS.unshift(cambio);
+  // Guardar en Firebase si está disponible
+  if (typeof window.fbSaveCambio === 'function') {
+    await window.fbSaveCambio(cambio);
+  }
 }
+
+// Iniciar listener de cambios en tiempo real al cargar la app
+function initCambiosListener() {
+  if (typeof window.fbListenCambios !== 'function') {
+    setTimeout(initCambiosListener, 500); return;
+  }
+  if (_cambiosUnlisten) { try { _cambiosUnlisten(); } catch(e){} }
+  _cambiosUnlisten = window.fbListenCambios(function(todos) {
+    CAMBIOS = todos;
+    // Actualizar página si está activa
+    const pag = document.getElementById('page-cambios');
+    if (pag && pag.classList.contains('active')) renderCambiosPage();
+  });
+}
+// Arrancar listener al inicializar
+setTimeout(initCambiosListener, 1000);
 
 // Hook saveRecord para capturar cambios
 const _origSaveRecord = window.saveRecord;
@@ -4956,59 +5013,112 @@ function showActiveProjects() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CONTROL DE CAMBIOS — página visual
+// CONTROL DE CAMBIOS — página visual agrupada por día
 // ══════════════════════════════════════════════════════════════════════════════
 function renderCambiosPage() {
-  loadCambios();
-  const q     = (document.getElementById('chg-q')?.value||'').toLowerCase();
-  const fTipo = document.getElementById('chg-f-tipo')?.value||'';
-  const filtered = CAMBIOS.filter(c=>
-    (!q     || c.nombre.toLowerCase().includes(q)) &&
-    (!fTipo || c.tipo===fTipo)
-  );
-  const cnt = document.getElementById('chg-count');
-  if(cnt) cnt.textContent = `${filtered.length} cambio${filtered.length!==1?'s':''}`;
-  const empty = document.getElementById('cambios-empty');
-  const list  = document.getElementById('cambios-list');
-  if(!filtered.length){
-    empty.style.display=''; list.style.display='none';
-    if(CAMBIOS.length && (q||fTipo)) empty.innerHTML=`<div style="font-size:40px;margin-bottom:12px">🔍</div><div style="font-size:14px;font-weight:700">Sin resultados</div>`;
+  // Si Firebase aún no tiene datos, cargar
+  if (!CAMBIOS.length && typeof window.fbGetCambios === 'function') {
+    document.getElementById('cambios-list').style.display = 'none';
+    document.getElementById('cambios-empty').style.display = '';
+    document.getElementById('cambios-empty').innerHTML = `
+      <div style="font-size:40px;margin-bottom:12px">⏳</div>
+      <div style="font-size:14px;font-weight:700">Cargando historial...</div>`;
+    window.fbGetCambios().then(todos => {
+      CAMBIOS = todos;
+      renderCambiosPage();
+    });
     return;
   }
-  empty.style.display='none'; list.style.display='flex';
-  const SEM_DOT={'En tiempo':'#4caf50','En riesgo':'#ffc107','Con problema':'#f44336','Sin iniciar':'#9e9e9e','En pausa':'#ff9800','Finalizado':'#607d8b'};
-  list.innerHTML = filtered.map((c,i)=>{
-    const dt   = new Date(c.ts);
-    const fecha= dt.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'});
-    const hora = dt.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
-    const dot  = SEM_DOT[c.valorNuevo]||'var(--blue)';
-    const isLast = i===filtered.length-1;
-    const tipoBg = c.tipo==='Proyecto'?'background:#deeaf8;color:#0d3b78':'background:#eceafe;color:#4a3899';
-    return `<div class="chg-item">
-      <div class="chg-line">
-        <span class="chg-dot" style="background:${dot};box-shadow:0 0 0 3px ${dot}33"></span>
-        ${!isLast?'<div class="chg-vline"></div>':''}
-      </div>
-      <div class="chg-card">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px">
-          <div>
-            <div class="chg-proyecto">${c.nombre}</div>
-            <div class="chg-meta">
-              ${c.tipo?`<span style="padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;${tipoBg}">${c.tipo}</span> · `:''}
-              <span style="font-weight:600">${c.usuario}</span> · ${fecha} a las ${hora}
+
+  const q     = (document.getElementById('chg-q')?.value||'').toLowerCase();
+  const fTipo = document.getElementById('chg-f-tipo')?.value||'';
+  const filtered = CAMBIOS.filter(c =>
+    (!q     || (c.nombre||'').toLowerCase().includes(q)) &&
+    (!fTipo || c.tipo === fTipo)
+  );
+
+  const cnt = document.getElementById('chg-count');
+  if (cnt) cnt.textContent = `${filtered.length} cambio${filtered.length!==1?'s':''}`;
+
+  const empty = document.getElementById('cambios-empty');
+  const list  = document.getElementById('cambios-list');
+
+  if (!filtered.length) {
+    empty.style.display = ''; list.style.display = 'none';
+    empty.innerHTML = CAMBIOS.length && (q||fTipo)
+      ? `<div style="font-size:40px;margin-bottom:12px">🔍</div><div style="font-size:14px;font-weight:700">Sin resultados</div>`
+      : `<div style="font-size:40px;margin-bottom:12px">🔄</div>
+         <div style="font-size:15px;font-weight:700;margin-bottom:8px">Control de Cambios</div>
+         <div style="font-size:13px;color:var(--text3)">Los cambios de estatus se registran automáticamente cuando editas un registro o sincronizas el Excel.</div>`;
+    return;
+  }
+
+  empty.style.display = 'none'; list.style.display = 'flex';
+
+  // ── Agrupar por día ────────────────────────────────────────────────────────
+  const SEM_DOT = {
+    'En tiempo':'#4caf50','En riesgo':'#ffc107','Con problema':'#f44336',
+    'Sin iniciar':'#9e9e9e','En pausa':'#ff9800','Finalizado':'#607d8b'
+  };
+  const byDay = {};
+  filtered.forEach(c => {
+    const dayKey = new Date(c.ts).toLocaleDateString('es-MX',{
+      weekday:'long', day:'2-digit', month:'long', year:'numeric'
+    });
+    if (!byDay[dayKey]) byDay[dayKey] = { fecha: new Date(c.ts), cambios: [] };
+    byDay[dayKey].cambios.push(c);
+  });
+
+  // Ordenar días más reciente primero
+  const days = Object.entries(byDay).sort((a,b) => b[1].fecha - a[1].fecha);
+
+  list.innerHTML = days.map(([dayLabel, { cambios }]) => {
+    const items = cambios.map((c, i) => {
+      const dt    = new Date(c.ts);
+      const hora  = dt.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+      const dot   = SEM_DOT[c.valorNuevo] || 'var(--blue)';
+      const tipoBg = c.tipo==='Proyecto'
+        ? 'background:#deeaf8;color:#0d3b78'
+        : 'background:#eceafe;color:#4a3899';
+      const isLast = i === cambios.length - 1;
+      return `<div class="chg-item">
+        <div class="chg-line">
+          <span class="chg-dot" style="background:${dot};box-shadow:0 0 0 3px ${dot}33"></span>
+          ${!isLast ? '<div class="chg-vline"></div>' : ''}
+        </div>
+        <div class="chg-card">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px">
+            <div>
+              <div class="chg-proyecto">${c.nombre}</div>
+              <div class="chg-meta">
+                ${c.tipo ? `<span style="padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;${tipoBg}">${c.tipo}</span> · ` : ''}
+                <span style="font-weight:600">${c.usuario}</span> · ${hora}
+              </div>
             </div>
+            <button onclick="goToDataFromCambio('${(c.nombre||'').replace(/'/g,"\\'")}')"
+              style="background:none;border:.5px solid var(--blue);color:var(--blue-t);border-radius:var(--rs);padding:3px 8px;font-size:11px;cursor:pointer;font-weight:700;white-space:nowrap;flex-shrink:0">→ Data</button>
           </div>
-          <button onclick="goToDataFromCambio('${c.nombre.replace(/'/g,"\\'")}');" title="Ver en Data"
-            style="background:none;border:.5px solid var(--blue);color:var(--blue-t);border-radius:var(--rs);padding:3px 8px;font-size:11px;cursor:pointer;font-weight:700;white-space:nowrap;flex-shrink:0">→ Data</button>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-size:11px;font-weight:600;color:var(--text3)">Estatus:</span>
+            <span class="chg-old">${c.valorAnterior}</span>
+            <span class="chg-arrow">→</span>
+            <span class="chg-new">${c.valorNuevo}</span>
+          </div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <span style="font-size:11px;font-weight:600;color:var(--text3)">Estatus:</span>
-          <span class="chg-old">${c.valorAnterior}</span>
-          <span class="chg-arrow">→</span>
-          <span class="chg-new">${c.valorNuevo}</span>
+      </div>`;
+    }).join('');
+
+    return `
+      <div style="margin-bottom:1.5rem;width:100%">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <div style="background:var(--blue-bg);color:var(--blue-t);padding:5px 14px;border-radius:20px;font-size:12px;font-weight:700;border:.5px solid var(--blue);text-transform:capitalize">
+            📅 ${dayLabel}
+          </div>
+          <span style="font-size:11px;color:var(--text3)">${cambios.length} cambio${cambios.length!==1?'s':''}</span>
+          <div style="flex:1;height:.5px;background:var(--border)"></div>
         </div>
-      </div>
-    </div>`;
+        ${items}
+      </div>`;
   }).join('');
 }
 
@@ -5021,48 +5131,76 @@ function goToDataFromCambio(nombre) {
   populateFilters(); applyFilters();
 }
 
-function clearAllCambios() {
-  if(!confirm('¿Eliminar todo el historial de cambios?')) return;
-  CAMBIOS=[];
-  try{localStorage.removeItem('pmo_cambios');}catch(e){}
+async function clearAllCambios() {
+  if (!confirm('¿Eliminar todo el historial de cambios? Esta acción no se puede deshacer.')) return;
+  CAMBIOS = [];
+  if (typeof window.fbClearCambios === 'function') {
+    await window.fbClearCambios();
+    toast('🗑️ Historial limpiado en Firebase');
+  } else {
+    toast('🗑️ Historial limpiado localmente');
+  }
   renderCambiosPage();
-  toast('🗑️ Historial limpiado');
 }
 
 function exportCambiosHTML() {
-  loadCambios();
-  if(!CAMBIOS.length){toast('Sin cambios registrados','error');return;}
-  const now=new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'});
-  const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Control Cambios · PMO</title>
+  if (!CAMBIOS.length) { toast('Sin cambios registrados','error'); return; }
+  const now = new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'});
+
+  // Agrupar por día para el reporte
+  const byDay = {};
+  CAMBIOS.forEach(c => {
+    const dk = new Date(c.ts).toLocaleDateString('es-MX',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
+    if (!byDay[dk]) byDay[dk] = [];
+    byDay[dk].push(c);
+  });
+
+  const diasHTML = Object.entries(byDay).map(([dia, cambios]) => `
+    <div style="margin-bottom:1.5rem">
+      <div style="background:#deeaf8;color:#0d3b78;padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;display:inline-block;margin-bottom:10px;text-transform:capitalize">📅 ${dia}</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:#f0ede8">
+          <th style="padding:7px 10px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;color:#888">Hora</th>
+          <th style="padding:7px 10px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;color:#888">Proyecto</th>
+          <th style="padding:7px 10px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;color:#888">Tipo</th>
+          <th style="padding:7px 10px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;color:#888">Antes</th>
+          <th style="padding:7px 10px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;color:#888">Después</th>
+          <th style="padding:7px 10px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;color:#888">Usuario</th>
+        </tr></thead>
+        <tbody>${cambios.map((c,i) => {
+          const hora = new Date(c.ts).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+          const tb = c.tipo==='Proyecto'?'background:#deeaf8;color:#0d3b78':'background:#eceafe;color:#4a3899';
+          return `<tr style="${i%2===0?'':'background:#fafaf9'}">
+            <td style="padding:7px 10px;color:#888">${hora}</td>
+            <td style="padding:7px 10px;font-weight:600">${c.nombre}</td>
+            <td style="padding:7px 10px"><span style="padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;${tb}">${c.tipo||'—'}</span></td>
+            <td style="padding:7px 10px"><span style="background:#fbeaea;color:#791f1f;padding:2px 7px;border-radius:4px;text-decoration:line-through">${c.valorAnterior}</span></td>
+            <td style="padding:7px 10px"><span style="background:#e4f2de;color:#1b5e20;padding:2px 7px;border-radius:4px;font-weight:700">${c.valorNuevo}</span></td>
+            <td style="padding:7px 10px;color:#888">${c.usuario}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`).join('');
+
+  const html = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Control de Cambios · PMO</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,'Segoe UI',sans-serif;color:#181816;background:#f5f4f1}
-.body{max-width:900px;margin:0 auto;padding:2rem}
-table{width:100%;border-collapse:collapse}th{padding:9px 12px;font-size:10px;font-weight:700;text-transform:uppercase;color:#888;background:#f0ede8;border-bottom:.5px solid #ddd;text-align:left}
-td{padding:9px 12px;border-bottom:.5px solid #eee;font-size:12px}tr:nth-child(even) td{background:#fafaf9}
-.old{background:#fbeaea;color:#791f1f;padding:2px 7px;border-radius:4px;text-decoration:line-through}
-.new{background:#e4f2de;color:#1b5e20;padding:2px 7px;border-radius:4px;font-weight:700}
-@media print{body{background:#fff}@page{margin:1.5cm}}</style></head><body><div class="body">
+.body{max-width:1000px;margin:0 auto;padding:2rem}
+@media print{body{background:#fff}.body{padding:.5rem}@page{margin:1.5cm}}</style>
+</head><body><div class="body">
 <div style="background:linear-gradient(135deg,#0d3b78,#1a5fb4);color:#fff;border-radius:12px;padding:1.5rem 2rem;margin-bottom:1.5rem">
   <div style="font-size:20px;font-weight:900;margin-bottom:4px">🔄 Control de Cambios · PMO TI</div>
-  <div style="font-size:12px;opacity:.8">Generado el ${now} · ${CAMBIOS.length} cambios</div>
+  <div style="font-size:12px;opacity:.8">Generado el ${now} · ${CAMBIOS.length} cambios en ${Object.keys(byDay).length} días</div>
 </div>
-<div style="background:#fff;border-radius:10px;border:.5px solid #ddd;overflow:hidden">
-<table><thead><tr><th>Fecha</th><th>Proyecto</th><th>Tipo</th><th>Estatus anterior</th><th>Estatus nuevo</th><th>Usuario</th></tr></thead>
-<tbody>${CAMBIOS.map(c=>{
-  const dt=new Date(c.ts);
-  const f=dt.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'})+' '+dt.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
-  const tb=c.tipo==='Proyecto'?'background:#deeaf8;color:#0d3b78':'background:#eceafe;color:#4a3899';
-  return`<tr><td style="color:#888;white-space:nowrap">${f}</td><td style="font-weight:600">${c.nombre}</td>
-  <td><span style="padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;${tb}">${c.tipo||'—'}</span></td>
-  <td><span class="old">${c.valorAnterior}</span></td>
-  <td><span class="new">${c.valorNuevo}</span></td>
-  <td style="color:#888">${c.usuario}</td></tr>`;
-}).join('')}</tbody></table></div>
+${diasHTML}
 <div style="text-align:center;padding:1rem;font-size:11px;color:#888;margin-top:1rem">PMO TI · ${now}</div>
 </div></body></html>`;
-  const blob=new Blob([html],{type:'text/html'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download=`Control-Cambios-${new Date().toISOString().slice(0,10)}.html`;a.click();
-  toast('📄 Exportado');
+
+  const blob = new Blob([html],{type:'text/html'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `Control-Cambios-${new Date().toISOString().slice(0,10)}.html`;
+  a.click();
+  toast('📄 Reporte exportado');
 }
 function goToDataFiltered(estatus, tipo) {
   if (estatus === '__sin_estatus__') {
