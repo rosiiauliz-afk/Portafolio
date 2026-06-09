@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PMO · Gestión de Portafolio TI</title>
-<!-- v10.5 - OBS en Firebase bidireccional + CAMBIOS en Firebase - 2026-06-05 -->
+<!-- v10.5c - obs Firebase ready-queue fix + timing fix - 2026-06-09 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -306,6 +306,47 @@ setTimeout(() => {
     box.style.background = '#e8f5e9'; box.style.borderColor = '#a5d6a7'; box.style.color = '#1b5e20';
   }
 }, 2000);
+
+// ══ OBS — nodo Firebase independiente pmo/obs ══════════════════════════════
+// Patrón de cola: si la app llama antes de que el módulo cargue, encola y ejecuta después
+window._fbObsReady = false;
+window._fbObsQueue = [];
+function _obsKey(n){ return encodeURIComponent((n||'').trim()).replace(/\./g,'__DOT__').slice(0,200); }
+
+window.fbSaveObs = async function(nombre, arr) {
+  if (!nombre) return;
+  try {
+    await set(ref(db, 'pmo/obs/' + _obsKey(nombre)), {
+      nombre, obs: arr, ts: new Date().toISOString()
+    });
+  } catch(e) { console.error('fbSaveObs error:', e); }
+};
+
+window.fbGetObs = async function(nombre) {
+  if (!nombre) return [];
+  try {
+    const s = await get(ref(db, 'pmo/obs/' + _obsKey(nombre)));
+    const d = s.val();
+    return Array.isArray(d?.obs) ? d.obs : [];
+  } catch(e) { console.error('fbGetObs error:', e); return []; }
+};
+
+window.fbListenObs = function(nombre, cb) {
+  if (!nombre) { cb([]); return function(){}; }
+  const r = ref(db, 'pmo/obs/' + _obsKey(nombre));
+  onValue(r, function(s) {
+    const d = s.val();
+    cb(Array.isArray(d?.obs) ? d.obs : []);
+  });
+  return function() { off(r); };
+};
+
+// Marcar como listo y ejecutar cola pendiente
+window._fbObsReady = true;
+if (window._fbObsQueue && window._fbObsQueue.length) {
+  window._fbObsQueue.forEach(fn => fn());
+  window._fbObsQueue = [];
+}
 </script>
 <style>
 :root{
@@ -706,6 +747,7 @@ tr:hover td{background:var(--bg)}
     <div class="page-header">
       <div><div class="page-title">Data</div><div class="page-sub">Gestiona todos los registros del portafolio</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost" onclick="exportDataExcel()" style="border-color:#1b7a3b;color:#1b7a3b;font-weight:700" title="Descargar data filtrada en Excel">📊 Descargar Excel</button>
         <button class="btn btn-ghost" onclick="openExportModal()" style="border-color:var(--green);color:var(--green);font-weight:700">📄 Exportar reporte</button>
         <button class="btn btn-primary" onclick="openModal()">+ Nuevo registro</button>
       </div>
@@ -1157,17 +1199,22 @@ tr:hover td{background:var(--bg)}
 
 <!-- Modal observaciones -->
 <div class="overlay" id="ovObs">
-  <div class="modal" style="max-width:500px">
-    <div class="modal-hdr"><span class="modal-title">💬 Observaciones Luis</span>
+  <div class="modal" style="max-width:520px">
+    <div class="modal-hdr">
+      <span class="modal-title">💬 Observaciones</span>
       <button class="modal-close" onclick="document.getElementById('ovObs').classList.remove('open')">×</button>
     </div>
     <div style="padding:16px">
-      <div id="obs-proyecto-name" style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px"></div>
-      <div id="obs-historico" style="display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;margin-bottom:14px"></div>
+      <div id="obs-proyecto-name" style="font-size:13px;font-weight:700;padding:8px 12px;background:var(--surface2);border-radius:var(--rs);margin-bottom:14px"></div>
+      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Historial</div>
+      <div id="obs-historico" style="display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;margin-bottom:14px;min-height:52px">
+        <div style="color:var(--text3);font-size:13px;text-align:center;padding:12px">⏳ Cargando...</div>
+      </div>
+      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Nuevo comentario</div>
       <div style="display:flex;gap:8px">
-        <textarea id="obs-nueva" placeholder="Escribe una observación..." rows="2"
+        <textarea id="obs-nueva" placeholder="Escribe tu comentario..." rows="2"
           style="flex:1;padding:8px 10px;border:.5px solid var(--border2);border-radius:var(--rs);font-size:13px;resize:vertical;font-family:inherit"></textarea>
-        <button class="btn btn-primary" onclick="addObservacion()" style="align-self:flex-end">Agregar</button>
+        <button class="btn btn-primary" id="obs-save-btn" onclick="addObservacionFB()" style="align-self:flex-end;white-space:nowrap">💾 Guardar</button>
       </div>
     </div>
   </div>
@@ -1540,23 +1587,23 @@ async function loadExcel(buffer, filename) {
       // _obs: mantener como texto libre
       if (!rec._obs || rec._obs === '—') rec._obs = '';
 
-      // ── HISTÓRICO OBSERVACIONES: usar store independiente ─────────────────
-      // 1. Siempre cargar historial del store local (nunca se pierde)
-      rec._obsHistorico = getObsForProject(rec._nombre || '');
-
-      // 2. Si el Excel trae obs nueva, agregarla al store y al registro
-      if (rec._obs && rec._obs.trim() !== '') {
+      // ── OBSERVACIONES DEL EXCEL → Firebase (async, no bloquea) ─────────────
+      if (rec._obs && rec._obs !== '—' && rec._obs.trim() !== '') {
         const obsNorm = rec._obs.trim();
-        const yaExiste = rec._obsHistorico.some(h => h.texto.trim() === obsNorm);
-        if (!yaExiste) {
-          const newObs = {
-            texto:   obsNorm,
-            fecha:   'Excel · ' + new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),
-            usuario: 'Excel',
-            ts:      new Date().toISOString(),
-          };
-          addObsToStore(rec._nombre || '', newObs);
-          rec._obsHistorico = getObsForProject(rec._nombre || '');
+        const recNombre = rec._nombre || '';
+        if (recNombre && typeof window.fbGetObs === 'function') {
+          (async () => {
+            const hist = await window.fbGetObs(recNombre);
+            if (!hist.some(h => h.texto === obsNorm)) {
+              hist.push({
+                texto:   obsNorm,
+                usuario: 'Excel',
+                fecha:   'Excel · ' + new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'}),
+                ts:      new Date().toISOString(),
+              });
+              await window.fbSaveObs(recNombre, hist);
+            }
+          })();
         }
       }
 
@@ -2233,13 +2280,12 @@ function renderTable() {
       if (c.k==='_retraso')   return `<td style="text-align:center">${v==='Si'?'<span style="color:#c0392b;font-weight:700">⚠️ Sí</span>':'<span style="color:#27ae60">✅ No</span>'}</td>`;
       return `<td title="${v||''}">${v||'—'}</td>`;
     }).join('');
-    // Ícono observaciones
-    const obsCount = (d._obsHistorico||[]).length + (d._obs&&d._obs!=='—'&&d._obs!==''?1:0);
+    // Ícono observaciones — siempre visible, sin contador (live desde Firebase al abrir)
+    const hasObsHint = d._obs && d._obs !== '—' && d._obs !== '';
     const obsIcon = `<td style="text-align:center">
-      <button title="${obsCount?obsCount+' observación(es)':'Sin observaciones'}" onclick="openObsModal(${ri})"
-        style="background:none;border:none;cursor:pointer;font-size:15px;position:relative">
-        💬${obsCount?`<span style="position:absolute;top:-4px;right:-6px;background:#c0392b;color:#fff;border-radius:50%;font-size:9px;width:14px;height:14px;display:flex;align-items:center;justify-content:center;font-weight:700">${obsCount>9?'9+':obsCount}</span>`:''}
-      </button>
+      <button title="Ver/agregar observaciones" onclick="openObsModal(${ri})"
+        style="background:none;border:none;cursor:pointer;font-size:16px;opacity:${hasObsHint?1:0.4};transition:opacity .15s"
+        onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=${hasObsHint?1:0.4}">💬</button>
     </td>`;
     return `<tr>${cells}${obsIcon}<td><div class="td-actions">
       <button class="btn btn-ghost btn-sm" onclick="openModal(${ri})">✏️</button>
@@ -4740,64 +4786,92 @@ function colDrop(e) {
 // ══════════════════════════════════════════════════════════════════════════════
 let _obsIdx = null;
 
+// ── Observaciones — Firebase pmo/obs (compartido entre todos los usuarios) ──
+let _obsNombreActual = null;
+let _obsUnlisten = null;
+
 function openObsModal(dbIdx) {
-  _obsIdx = dbIdx;
   const d = DB[dbIdx];
-  document.getElementById('obs-proyecto-name').textContent = d._nombre || '—';
-  renderObsHistorico(d);
+  if (!d) return;
+  _obsNombreActual = d._nombre || '';
+  document.getElementById('obs-proyecto-name').textContent = '📋 ' + _obsNombreActual;
   document.getElementById('obs-nueva').value = '';
+  document.getElementById('obs-historico').innerHTML =
+    '<div style="color:var(--text3);font-size:13px;text-align:center;padding:16px">⏳ Cargando comentarios...</div>';
   document.getElementById('ovObs').classList.add('open');
+
+  // Cancelar listener anterior
+  if (_obsUnlisten) { try { _obsUnlisten(); } catch(e){} _obsUnlisten = null; }
+
+  // Esperar a que el módulo Firebase esté listo
+  function iniciarListener() {
+    if (typeof window.fbListenObs === 'function') {
+      _obsUnlisten = window.fbListenObs(_obsNombreActual, renderObsHistorico);
+    } else {
+      // Firebase aún no listo — reintentar
+      setTimeout(iniciarListener, 150);
+    }
+  }
+  iniciarListener();
 }
 
-function renderObsHistorico(d) {
-  const hist = Array.isArray(d._obsHistorico) ? d._obsHistorico : [];
-  const container = document.getElementById('obs-historico');
-  if (!hist.length) {
-    container.innerHTML = `<div style="font-size:13px;color:var(--text3);padding:8px 0;text-align:center">Sin observaciones aún. Agrega la primera abajo. 👇</div>`;
+function renderObsHistorico(hist) {
+  const el = document.getElementById('obs-historico');
+  if (!el) return;
+  if (!hist || !hist.length) {
+    el.innerHTML = '<div style="font-size:13px;color:var(--text3);padding:16px;text-align:center;background:var(--surface2);border-radius:var(--rs)">Sin observaciones aún.<br><span style="font-size:11px">Agrega el primer comentario abajo. 👇</span></div>';
     return;
   }
-  // Mostrar del más nuevo al más antiguo
-  const sorted = [...hist].reverse();
-  container.innerHTML = sorted.map((h, i) => `
-    <div style="background:var(--surface2);border-radius:var(--rs);padding:10px 12px;border-left:3px solid ${h.usuario==='Excel'?'#e67e22':'var(--blue)'}">
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
-        <span style="font-size:10px;font-weight:700;color:${h.usuario==='Excel'?'#e67e22':'var(--blue-t)'}">
-          ${h.usuario==='Excel'?'📗 Excel':'💬 '+h.usuario}
+  const sorted = [...hist].sort((a,b) => new Date(b.ts||0) - new Date(a.ts||0));
+  el.innerHTML = sorted.map((h,i) => `
+    <div style="background:var(--surface2);border-radius:var(--rs);padding:10px 13px;border-left:3px solid ${h.usuario==='Excel'?'#e67e22':'var(--blue)'}">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;flex-wrap:wrap">
+        <span style="font-size:11px;font-weight:700;padding:1px 8px;border-radius:20px;background:${h.usuario==='Excel'?'#fff3e0':'var(--blue-bg)'};color:${h.usuario==='Excel'?'#e65100':'var(--blue-t)'}">
+          ${h.usuario==='Excel'?'📗 Excel':'👤 '+(h.usuario||'Usuario')}
         </span>
-        <span style="font-size:10px;color:var(--text3)">· ${h.fecha||''}</span>
-        <span style="margin-left:auto;font-size:10px;color:var(--text3)">Obs. ${hist.length - i}</span>
+        <span style="font-size:10px;color:var(--text3)">${h.fecha||''}</span>
+        <span style="margin-left:auto;font-size:10px;color:var(--text3);font-weight:700">Obs. ${hist.length - i}</span>
       </div>
-      <div style="font-size:13px;color:var(--text2)">${h.texto}</div>
+      <div style="font-size:13px;color:var(--text);line-height:1.5">${h.texto}</div>
     </div>`).join('');
 }
 
-function addObservacion() {
+async function addObservacionFB() {
   const txt = document.getElementById('obs-nueva').value.trim();
-  if (!txt) { toast('Escribe una observación primero','error'); return; }
-  if (_obsIdx === null) return;
-  const d = DB[_obsIdx];
-  const nombre = d._nombre || '';
-  const hist = getObsForProject(nombre);
-  if (hist.some(h => h.texto.trim() === txt)) {
-    toast('⚠️ Esta observación ya existe','error'); return;
+  if (!txt) { toast('Escribe un comentario primero','error'); return; }
+  if (!_obsNombreActual) { toast('Error: proyecto no identificado','error'); return; }
+
+  if (typeof window.fbGetObs !== 'function' || typeof window.fbSaveObs !== 'function') {
+    toast('Firebase aún no listo, intenta en un momento','error'); return;
   }
-  const now = new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
-  const newObs = {
-    texto:   txt,
-    fecha:   now,
-    usuario: window._currentUser?.email?.split('@')[0] || 'Usuario',
-    ts:      new Date().toISOString(),
-  };
-  // Guardar en store independiente
-  addObsToStore(nombre, newObs);
-  // Sincronizar al registro en DB
-  d._obsHistorico = getObsForProject(nombre);
-  renderObsHistorico(d);
-  document.getElementById('obs-nueva').value = '';
-  saveToStorage();
-  broadcastChange();
-  toast(`💬 Observación ${d._obsHistorico.length} registrada y guardada`);
+
+  const btn = document.getElementById('obs-save-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
+
+  try {
+    const hist = await window.fbGetObs(_obsNombreActual);
+    if (hist.some(h => h.texto === txt)) {
+      toast('Este comentario ya existe','error'); return;
+    }
+    hist.push({
+      texto:   txt,
+      usuario: window._currentUser?.email?.split('@')[0] || 'Usuario',
+      fecha:   new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),
+      ts:      new Date().toISOString(),
+    });
+    await window.fbSaveObs(_obsNombreActual, hist);
+    document.getElementById('obs-nueva').value = '';
+    toast('💬 Comentario guardado — visible para todos los usuarios');
+    // El listener en tiempo real actualizará la lista automáticamente
+  } catch(e) {
+    console.error('addObservacionFB error:', e);
+    toast('Error al guardar: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '💾 Guardar'; }
+  }
 }
+function addObservacion() { addObservacionFB(); }
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // MEJORA 2 — CONTROL DE CAMBIOS (registro automático de cambios de estatus)
@@ -4987,6 +5061,58 @@ function goToDataFiltered(estatus, tipo) {
   document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
   const cnt = document.getElementById('tbl-count');
   if(cnt) cnt.textContent = filteredDB.length+' de '+DB.length+' registros';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXPORTAR DATA A EXCEL (basado en filtros activos)
+// ══════════════════════════════════════════════════════════════════════════════
+function exportDataExcel() {
+  if (!filteredDB || !filteredDB.length) { toast('No hay datos para exportar','error'); return; }
+
+  // Columnas visibles (respeta configuración de usuario)
+  const visCols = COLS.filter(c => c.vis !== false);
+
+  // Encabezados
+  const headers = visCols.map(c => c.l);
+  // Filas
+  const rows = filteredDB.map(d => visCols.map(c => {
+    const v = d[c.k];
+    if (c.k === '_avance') return (v || 0) + '%';
+    if (c.k === '_estatus') return normEstatus(v) || v || '—';
+    return v || '—';
+  }));
+
+  // Crear workbook con SheetJS (ya importado en la app)
+  const wb = XLSX.utils.book_new();
+  const wsData = [headers, ...rows];
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+  // Ancho de columnas automático
+  ws['!cols'] = headers.map((h, i) => {
+    const maxLen = Math.max(
+      h.length,
+      ...rows.map(r => String(r[i]||'').length)
+    );
+    return { wch: Math.min(maxLen + 2, 50) };
+  });
+
+  // Estilo de encabezado (fila 1 en negrita — SheetJS community no soporta estilos, se hace con xlsx-style si disponible)
+  XLSX.utils.book_append_sheet(wb, ws, 'Data PMO');
+
+  // Hoja de metadatos
+  const meta = [
+    ['Reporte generado:', new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'})],
+    ['Total registros filtrados:', filteredDB.length],
+    ['Total en portafolio:', DB.length],
+    ['Filtros aplicados:', filteredDB.length < DB.length ? 'Sí' : 'No'],
+  ];
+  const wsMeta = XLSX.utils.aoa_to_sheet(meta);
+  XLSX.utils.book_append_sheet(wb, wsMeta, 'Info');
+
+  // Descargar
+  const fecha = new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb, `PMO-Data-${fecha}.xlsx`);
+  toast(`📊 Excel descargado · ${filteredDB.length} registros`);
 }
 </script>
 </body>
