@@ -421,10 +421,24 @@ window.fbClearCambios = async function() {
 }
 .tooltip-prox{
   position:fixed;z-index:9999;background:#1e2a3a;color:#f0f4f8;
-  font-size:12px;line-height:1.6;padding:10px 14px;border-radius:8px;
-  max-width:300px;white-space:pre-wrap;pointer-events:none;
-  box-shadow:0 4px 20px rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.1);
-  display:none;
+  font-size:12px;line-height:1.6;padding:0;border-radius:10px;
+  max-width:340px;min-width:200px;pointer-events:none;
+  box-shadow:0 6px 24px rgba(0,0,0,.4);border:1px solid rgba(255,255,255,.12);
+  display:none;overflow:hidden;
+}
+.tooltip-prox .tp-nombre{
+  padding:9px 13px 7px;background:rgba(255,255,255,.06);
+  border-bottom:1px solid rgba(255,255,255,.1);
+  font-size:11px;font-weight:700;color:#e0e0e0;
+  white-space:normal;word-break:break-word;line-height:1.4;
+}
+.tooltip-prox .tp-label{
+  font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;
+  color:#90caf9;margin-bottom:3px;
+}
+.tooltip-prox .tp-pasos{
+  padding:9px 13px 10px;font-size:12px;color:#f0f4f8;
+  white-space:pre-wrap;word-break:break-word;line-height:1.55;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}
@@ -2353,14 +2367,12 @@ function renderTable() {
       if (c.k==='_tipo')      return `<td><span class="badge ${tipoBadge(v)}">${v||'—'}</span></td>`;
       if (c.k==='_nombre') {
         const prox = d._proxPasos && d._proxPasos !== '—' ? d._proxPasos : '';
+        const nombreFull = (v||'').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
         const proxAttr = prox ? ` data-prox="${prox.replace(/"/g,'&quot;').replace(/'/g,'&#39;')}"` : '';
         const proxStyle = prox
           ? 'font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help;border-bottom:1.5px dotted var(--blue)'
           : 'font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-        const proxEvents = prox
-          ? ` onmousemove="showProxTooltip(event,this)" onmouseleave="hideProxTooltip()"`
-          : '';
-        return `<td style="${proxStyle}"${proxAttr}${proxEvents} title="${v||''}">${tuvoCambio?'⚠️ ':''}<span>${v||'—'}</span></td>`;
+        return `<td style="${proxStyle}" data-nombre="${nombreFull}"${proxAttr} onmousemove="showProxTooltip(event,this)" onmouseleave="hideProxTooltip()">${tuvoCambio?'⚠️ ':''}<span>${v||'—'}</span></td>`;
       }
       if (c.k==='_estatus')   return `<td>${semBadge(v, d)}</td>`;
       if (c.k==='_prioridad') return `<td><span class="badge ${prioBadge(v)}">${v||'—'}</span></td>`;
@@ -5280,9 +5292,13 @@ function goToDataFiltered(estatus, tipo) {
 // TOOLTIP — Próximos Pasos (hover sobre nombre del proyecto)
 // ══════════════════════════════════════════════════════════════════════════════
 function showProxTooltip(e, el) {
-  // el siempre es el <td> con data-prox (pasado como this)
-  const txt = el.dataset.prox;
-  if (!txt) return;
+  const nombre = el.dataset.nombre || '';
+  const prox   = el.dataset.prox   || '';
+  // Mostrar siempre si hay nombre largo O si hay próximos pasos
+  const nombreLargo = nombre.length > 35;
+  if (!nombre && !prox) return;
+  if (!nombreLargo && !prox) return;
+
   let tip = document.getElementById('_proxTip');
   if (!tip) {
     tip = document.createElement('div');
@@ -5290,12 +5306,24 @@ function showProxTooltip(e, el) {
     tip.className = 'tooltip-prox';
     document.body.appendChild(tip);
   }
-  tip.innerHTML = '<strong style="display:block;margin-bottom:5px;color:#90caf9;font-size:11px;text-transform:uppercase;letter-spacing:.5px">📋 Próximo paso</strong>' +
-    txt.replace(/</g,'&lt;').replace(/\n/g,'<br>');
+
+  let html = '';
+  // Sección nombre (solo si es largo y no cabe en la celda)
+  if (nombreLargo) {
+    html += `<div class="tp-nombre">${nombre.replace(/</g,'&lt;')}</div>`;
+  }
+  // Sección próximos pasos
+  if (prox) {
+    html += `<div class="tp-pasos"><span class="tp-label">📋 Próximo paso</span><br>${prox.replace(/</g,'&lt;').replace(/\n/g,'<br>')}</div>`;
+  }
+
+  tip.innerHTML = html;
   tip.style.display = 'block';
-  // Posición debajo del cursor, sin salirse de pantalla
-  const x = Math.min(e.clientX + 10, window.innerWidth - 320);
-  const y = e.clientY + 18;
+
+  // Posición: debajo del cursor, ajustada para no salirse de pantalla
+  const tipW = 340;
+  const x = Math.min(e.clientX + 12, window.innerWidth - tipW - 8);
+  const y = e.clientY + 20;
   tip.style.left = x + 'px';
   tip.style.top  = y + 'px';
 }
@@ -5358,3 +5386,4 @@ function exportDataExcel() {
 </script>
 </body>
 </html>
+
