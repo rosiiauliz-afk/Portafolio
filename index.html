@@ -31,6 +31,7 @@ const auth = getAuth(app);
 // ── Exponer al scope global ──────────────────────────────────────────────────
 window._fbDB  = db;
 window._fbRef = ref;
+window._fbGet = get;  // exponer get() para loadSharedSnaps y otros módulos
 window._fbSet = set;
 window._fbAuth = auth;
 
@@ -249,11 +250,12 @@ function startDataSync() {
     }
     window.DB.forEach(d => { d._estatus = window.normEstatus(d._estatus); });
     window.deduplicateRDB();
+    // Siempre renderizar snapshots (también para viewers sin DB local)
+    if (typeof window.renderSnaps === 'function') window.renderSnaps();
     if (window.DB.length || window.SNAPS.length) {
       if (typeof syncObsToDb === 'function') syncObsToDb();
       window.restoreUIFromData();
       window.refreshAllViews();
-      if (typeof window.renderSnaps === 'function') window.renderSnaps();
       if (window._fbReady) window.toast('🔄 Datos actualizados en tiempo real');
       window._fbReady = true;
       window._lastFbUpdate = Date.now();
@@ -3381,7 +3383,46 @@ function saveSnap(){
 // ══════════════════════════════════════════════════════════════════════════════
 function loadSharedSnaps() {
   const btn = document.getElementById('btnLoadShared');
+  const resetBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '🔄 Actualizar histórico'; } };
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Cargando...'; }
+
+  if (!window._fbDB || !window._fbRef) {
+    toast('⚠️ Sin conexión a Firebase. Inicia sesión primero.', 'error');
+    resetBtn(); return;
+  }
+
+  // get() ya está importado en el scope del módulo ES y expuesto como window._fbGet
+  const doGet = window._fbGet || null;
+  if (!doGet) {
+    // Fallback: forzar re-lectura via onValue con once
+    toast('⚠️ Recarga la página para ver el histórico actualizado', 'error');
+    resetBtn(); return;
+  }
+
+  doGet(window._fbRef(window._fbDB, 'pmo'))
+    .then(snap => {
+      const data = snap.val();
+      if (!data) { toast('Sin datos en Firebase', 'error'); resetBtn(); return; }
+
+      const remoteSnaps = data.SNAPS || [];
+      if (!remoteSnaps.length) {
+        toast('El Admin aún no ha guardado ningún snapshot', 'error');
+        resetBtn(); return;
+      }
+      // Fusionar remotos + locales únicos
+      const remoteIds = new Set(remoteSnaps.map(s => s.id));
+      const localOnly = SNAPS.filter(s => !remoteIds.has(s.id));
+      SNAPS = [...remoteSnaps, ...localOnly].sort((a, b) => b.fecha > a.fecha ? 1 : -1);
+      renderSnaps();
+      const n = remoteSnaps.length;
+      toast('✅ ' + n + ' snapshot' + (n > 1 ? 's' : '') + ' cargado' + (n > 1 ? 's' : '') + ' desde Firebase');
+      resetBtn();
+    })
+    .catch(err => {
+      toast('Error Firebase: ' + (err.message || err), 'error');
+      resetBtn();
+    });
+}
 
   const resetBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '🔄 Actualizar histórico'; } };
 
