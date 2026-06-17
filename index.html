@@ -1539,7 +1539,10 @@ const EXCEL_MAP = {
   _fechaInicio:['fecha inicio','fecha de inicio','start date','inicio','fecha_inicio'],
   _fechaFin:   ['fecha fin','fecha de fin','end date','fin','fecha_fin','fecha termino','fecha término'],
   _riesgos:    ['riesgos','riesgo','risks','risk','descripcion riesgo','descripción riesgo','riesgo identificado','riesgos identificados','riesgo proyecto'],
-  _proxPasos:  ['proximos pasos','próximos pasos','próx pasos','prox pasos','next steps','siguientes pasos','acciones siguientes','proximos pasos (pm)','próximos pasos (pm)'],
+  _proxPasos:  ['proximos pasos','próximos pasos','próx pasos','prox pasos','proximo paso','próximo paso',
+                 'next steps','next step','siguientes pasos','siguiente paso','acciones siguientes',
+                 'proximos pasos (pm)','próximos pasos (pm)','proximos','proxpasos','prox pasos pm',
+                 'plan de accion','plan de acción','acciones','pasos siguientes'],
 };
 
 function matchHeaders(headers) {
@@ -1599,6 +1602,19 @@ async function loadExcel(buffer, filename) {
     // Debug: mostrar en consola qué columnas se detectaron
     const mappedHeaders = Object.entries(colMap).map(([i,f])=>`col[${i}]="${headers[i]}"→${f}`);
     console.log('📗 Excel headers mapeados:', mappedHeaders.join(', '));
+
+    // Debug específico para _proxPasos
+    const proxColIdx = Object.entries(colMap).find(([,f])=>f==='_proxPasos')?.[0];
+    if (proxColIdx !== undefined) {
+      console.log(`✅ Próximos pasos detectado en col[${proxColIdx}]: "${headers[proxColIdx]}"`);
+    } else {
+      console.warn('⚠️ Columna "Próximos pasos" NO detectada. Headers del Excel:', headers);
+      // Mostrar cada header normalizado para ayudar al diagnóstico
+      headers.forEach((h,i) => {
+        const hn = String(h||'').toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ');
+        console.log(`  col[${i}] raw="${h}" normalizado="${hn}"`);
+      });
+    }
 
     // Verificar columnas clave detectadas
     const pmColIdx = Object.entries(colMap).find(([,f])=>f==='_pm')?.[0];
