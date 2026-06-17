@@ -953,6 +953,7 @@ tr:hover td{background:var(--bg)}
     <div class="page-header">
       <div><div class="page-title">Histórico</div><div class="page-sub" id="h-sub">—</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost" id="btnLoadShared" onclick="loadSharedSnaps()" title="Cargar snapshots guardados desde Firebase">🔄 Actualizar histórico</button>
         <button class="btn btn-primary" id="btnSnap" onclick="saveSnap()" disabled>📸 Guardar snapshot</button>
         <button class="btn btn-ghost" id="btnComp" onclick="openComp()" style="display:none">⚖️ Comparar</button>
       </div>
@@ -3375,6 +3376,52 @@ function saveSnap(){
   }
   toast('📸 Snapshot guardado: '+label+' · Subiendo a Firebase para todos los usuarios...');
 }
+// ══════════════════════════════════════════════════════════════════════════════
+// CARGAR HISTÓRICO COMPARTIDO DESDE FIREBASE (visible para todos los roles)
+// ══════════════════════════════════════════════════════════════════════════════
+function loadSharedSnaps() {
+  const btn = document.getElementById('btnLoadShared');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Cargando...'; }
+
+  const resetBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '🔄 Actualizar histórico'; } };
+
+  if (!window._fbDB || !window._fbRef) {
+    toast('⚠️ Sin conexión a Firebase. Inicia sesión primero.', 'error');
+    resetBtn(); return;
+  }
+
+  // Usar import dinámico igual que el resto del archivo
+  import('https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js')
+    .then(({ get }) => {
+      const pmoRef = window._fbRef(window._fbDB, 'pmo');
+      return get(pmoRef);
+    })
+    .then(snap => {
+      const data = snap.val();
+      if (!data) { toast('Sin datos en Firebase', 'error'); resetBtn(); return; }
+
+      const remoteSnaps = data.SNAPS || [];
+      if (!remoteSnaps.length) {
+        toast('El Admin aún no ha guardado ningún snapshot', 'error');
+        resetBtn(); return;
+      }
+
+      // Fusionar: remotos + locales únicos que no estén en remoto
+      const remoteIds = new Set(remoteSnaps.map(s => s.id));
+      const localOnly = SNAPS.filter(s => !remoteIds.has(s.id));
+      SNAPS = [...remoteSnaps, ...localOnly].sort((a, b) => b.fecha > a.fecha ? 1 : -1);
+
+      renderSnaps();
+      const n = remoteSnaps.length;
+      toast('✅ ' + n + ' snapshot' + (n > 1 ? 's' : '') + ' cargado' + (n > 1 ? 's' : '') + ' desde Firebase');
+      resetBtn();
+    })
+    .catch(err => {
+      toast('Error al conectar Firebase: ' + (err.message || err), 'error');
+      resetBtn();
+    });
+}
+
 function renderSnaps(){
   const list=document.getElementById('snapList');
   const empty=document.getElementById('h-empty');
@@ -5295,9 +5342,7 @@ function showProxTooltip(e, el) {
   const nombre = el.dataset.nombre || '';
   const prox   = el.dataset.prox   || '';
   // Mostrar siempre si hay nombre largo O si hay próximos pasos
-  const nombreLargo = nombre.length > 35;
   if (!nombre && !prox) return;
-  if (!nombreLargo && !prox) return;
 
   let tip = document.getElementById('_proxTip');
   if (!tip) {
@@ -5309,7 +5354,7 @@ function showProxTooltip(e, el) {
 
   let html = '';
   // Sección nombre (solo si es largo y no cabe en la celda)
-  if (nombreLargo) {
+  if (nombre) {
     html += `<div class="tp-nombre">${nombre.replace(/</g,'&lt;')}</div>`;
   }
   // Sección próximos pasos
@@ -5386,4 +5431,3 @@ function exportDataExcel() {
 </script>
 </body>
 </html>
-
