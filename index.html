@@ -419,6 +419,13 @@ window.fbClearCambios = async function() {
   --sem-fin-dot:#607d8b;--sem-fin-bdr:#455a64;--sem-fin-bg:#eceff1;--sem-fin-txt:#263238;
   --shadow:0 1px 3px rgba(0,0,0,.07),0 4px 12px rgba(0,0,0,.04);
 }
+.tooltip-prox{
+  position:fixed;z-index:9999;background:#1e2a3a;color:#f0f4f8;
+  font-size:12px;line-height:1.6;padding:10px 14px;border-radius:8px;
+  max-width:300px;white-space:pre-wrap;pointer-events:none;
+  box-shadow:0 4px 20px rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.1);
+  display:none;
+}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}
 
@@ -1532,6 +1539,7 @@ const EXCEL_MAP = {
   _fechaInicio:['fecha inicio','fecha de inicio','start date','inicio','fecha_inicio'],
   _fechaFin:   ['fecha fin','fecha de fin','end date','fin','fecha_fin','fecha termino','fecha término'],
   _riesgos:    ['riesgos','riesgo','risks','risk','descripcion riesgo','descripción riesgo','riesgo identificado','riesgos identificados','riesgo proyecto'],
+  _proxPasos:  ['proximos pasos','próximos pasos','próx pasos','prox pasos','next steps','siguientes pasos','acciones siguientes','proximos pasos (pm)','próximos pasos (pm)'],
 };
 
 function matchHeaders(headers) {
@@ -2326,7 +2334,12 @@ function renderTable() {
     const cells = visCols.map(c => {
       const v=d[c.k];
       if (c.k==='_tipo')      return `<td><span class="badge ${tipoBadge(v)}">${v||'—'}</span></td>`;
-      if (c.k==='_nombre')    return `<td style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v||''}">${tuvoCambio?'⚠️ ':''}<span title="${tuvoCambio?'Este proyecto tuvo cambios de estatus. Ver Control de Cambios.':''}">${v||'—'}</span></td>`;
+      if (c.k==='_nombre') {
+        const prox = d._proxPasos && d._proxPasos !== '—' ? d._proxPasos : '';
+        const proxAttr = prox ? ` data-prox="${prox.replace(/"/g,'&quot;').replace(/'/g,'&#39;')}"` : '';
+        const proxHint = prox ? ' style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help;border-bottom:1.5px dotted var(--blue)"' : ' style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"';
+        return `<td${proxHint}${proxAttr} onmouseenter="showProxTooltip(event,this)" onmouseleave="hideProxTooltip()" title="${v||''}">${tuvoCambio?'⚠️ ':''}<span title="${tuvoCambio?'Este proyecto tuvo cambios de estatus. Ver Control de Cambios.':''}">${v||'—'}</span></td>`;
+      }
       if (c.k==='_estatus')   return `<td>${semBadge(v, d)}</td>`;
       if (c.k==='_prioridad') return `<td><span class="badge ${prioBadge(v)}">${v||'—'}</span></td>`;
       if (c.k==='_avance')    return `<td><div style="display:flex;align-items:center;gap:8px;min-width:90px">
@@ -5239,6 +5252,33 @@ function goToDataFiltered(estatus, tipo) {
   document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.includes('Data'))b.classList.add('active');});
   const cnt = document.getElementById('tbl-count');
   if(cnt) cnt.textContent = filteredDB.length+' de '+DB.length+' registros';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TOOLTIP — Próximos Pasos (hover sobre nombre del proyecto)
+// ══════════════════════════════════════════════════════════════════════════════
+function showProxTooltip(e, el) {
+  const txt = el.dataset.prox;
+  if (!txt) return;
+  let tip = document.getElementById('_proxTip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = '_proxTip';
+    tip.className = 'tooltip-prox';
+    document.body.appendChild(tip);
+  }
+  tip.innerHTML = '<strong style="display:block;margin-bottom:5px;color:#90caf9;font-size:11px;text-transform:uppercase;letter-spacing:.5px">📋 Próximos pasos</strong>' +
+    txt.replace(/</g,'&lt;').replace(/\n/g,'<br>');
+  tip.style.display = 'block';
+  // Posicionamiento: debajo del cursor, ajustado para no salirse de pantalla
+  const x = Math.min(e.clientX + 10, window.innerWidth - 320);
+  const y = e.clientY + 18;
+  tip.style.left = x + 'px';
+  tip.style.top  = y + 'px';
+}
+function hideProxTooltip() {
+  const tip = document.getElementById('_proxTip');
+  if (tip) tip.style.display = 'none';
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
