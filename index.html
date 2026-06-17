@@ -1606,14 +1606,15 @@ async function loadExcel(buffer, filename) {
     // Debug específico para _proxPasos
     const proxColIdx = Object.entries(colMap).find(([,f])=>f==='_proxPasos')?.[0];
     if (proxColIdx !== undefined) {
-      console.log(`✅ Próximos pasos detectado en col[${proxColIdx}]: "${headers[proxColIdx]}"`);
+      console.log(`✅ Próximo paso detectado en col[${proxColIdx}]: "${headers[proxColIdx]}"`);
     } else {
-      console.warn('⚠️ Columna "Próximos pasos" NO detectada. Headers del Excel:', headers);
+      console.warn('⚠️ Columna "Próximo paso" NO detectada. Headers del Excel:', headers);
       // Mostrar cada header normalizado para ayudar al diagnóstico
       headers.forEach((h,i) => {
         const hn = String(h||'').toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ');
         console.log(`  col[${i}] raw="${h}" normalizado="${hn}"`);
       });
+      toast('⚠️ No se detectó columna "Próximo paso" en el Excel', 'error');
     }
 
     // Verificar columnas clave detectadas
@@ -2353,8 +2354,13 @@ function renderTable() {
       if (c.k==='_nombre') {
         const prox = d._proxPasos && d._proxPasos !== '—' ? d._proxPasos : '';
         const proxAttr = prox ? ` data-prox="${prox.replace(/"/g,'&quot;').replace(/'/g,'&#39;')}"` : '';
-        const proxHint = prox ? ' style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help;border-bottom:1.5px dotted var(--blue)"' : ' style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"';
-        return `<td${proxHint}${proxAttr} onmouseenter="showProxTooltip(event,this)" onmouseleave="hideProxTooltip()" title="${v||''}">${tuvoCambio?'⚠️ ':''}<span title="${tuvoCambio?'Este proyecto tuvo cambios de estatus. Ver Control de Cambios.':''}">${v||'—'}</span></td>`;
+        const proxStyle = prox
+          ? 'font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help;border-bottom:1.5px dotted var(--blue)'
+          : 'font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+        const proxEvents = prox
+          ? ` onmousemove="showProxTooltip(event,this)" onmouseleave="hideProxTooltip()"`
+          : '';
+        return `<td style="${proxStyle}"${proxAttr}${proxEvents} title="${v||''}">${tuvoCambio?'⚠️ ':''}<span>${v||'—'}</span></td>`;
       }
       if (c.k==='_estatus')   return `<td>${semBadge(v, d)}</td>`;
       if (c.k==='_prioridad') return `<td><span class="badge ${prioBadge(v)}">${v||'—'}</span></td>`;
@@ -5274,6 +5280,7 @@ function goToDataFiltered(estatus, tipo) {
 // TOOLTIP — Próximos Pasos (hover sobre nombre del proyecto)
 // ══════════════════════════════════════════════════════════════════════════════
 function showProxTooltip(e, el) {
+  // el siempre es el <td> con data-prox (pasado como this)
   const txt = el.dataset.prox;
   if (!txt) return;
   let tip = document.getElementById('_proxTip');
@@ -5283,10 +5290,10 @@ function showProxTooltip(e, el) {
     tip.className = 'tooltip-prox';
     document.body.appendChild(tip);
   }
-  tip.innerHTML = '<strong style="display:block;margin-bottom:5px;color:#90caf9;font-size:11px;text-transform:uppercase;letter-spacing:.5px">📋 Próximos pasos</strong>' +
+  tip.innerHTML = '<strong style="display:block;margin-bottom:5px;color:#90caf9;font-size:11px;text-transform:uppercase;letter-spacing:.5px">📋 Próximo paso</strong>' +
     txt.replace(/</g,'&lt;').replace(/\n/g,'<br>');
   tip.style.display = 'block';
-  // Posicionamiento: debajo del cursor, ajustado para no salirse de pantalla
+  // Posición debajo del cursor, sin salirse de pantalla
   const x = Math.min(e.clientX + 10, window.innerWidth - 320);
   const y = e.clientY + 18;
   tip.style.left = x + 'px';
